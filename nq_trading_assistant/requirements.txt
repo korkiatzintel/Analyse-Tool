@@ -1,0 +1,24 @@
+# Rithmic connectivity
+async_rithmic>=0.2.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Technical analysis (pandas-ta as talib fallback)
+pandas-ta>=0.3.14b
+
+# UI
+streamlit>=1.35.0
+plotly>=5.20.0
+
+# AI
+anthropic>=0.25.0
+
+# Config & utilities
+python-dotenv>=1.0.0
+configparser>=5.3.0
+
+# Async support
+aiofiles>=23.2.0
+asyncio-throttle>=1.0.2
