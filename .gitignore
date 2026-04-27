@@ -26,3 +26,6 @@ env/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Runtime logs
+nq_trading_assistant/logs/*.log
