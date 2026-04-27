@@ -1,0 +1,370 @@
+"""
+AI-powered trade signal analysis via the Anthropic API.
+
+ClaudeAnalyst wraps the Signal Engine output and L2 market data into
+a structured prompt, calls claude-sonnet-4-20250514, and returns a
+parsed verdict dict.
+
+Rate limiting: one API call per 30 seconds maximum.
+Call guard: only fires when confidence > 0.65 AND >= 2 distinct signal types.
+
+Memory: rolling deque of last 20 analyses (in-process, no persistence).
+"""
+
+import asyncio
+import configparser
+import logging
+import re
+import time
+from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import anthropic
+
+logger = logging.getLogger(__name__)
+
+_CONFIG_PATH   = Path(__file__).parent.parent / "config" / "credentials.ini"
+_MODEL         = "claude-sonnet-4-20250514"
+_MIN_INTERVAL  = 30.0      # seconds between API calls
+_MIN_CONFIDENCE = 0.65
+_MIN_SIGNAL_TYPES = 2
+_MEMORY_SIZE   = 20
+_MAX_TOKENS    = 512
+
+_SYSTEM_PROMPT = """\
+Du bist ein erfahrener NQ Futures Day Trader und Order Flow Spezialist.
+Du analysierst Echtzeit-Marktdaten des E-Mini Nasdaq 100 (NQ).
+Deine Aufgabe: Gib präzise, handlungsorientierte Einschätzungen basierend auf Order Flow und technischer Analyse.
+Antworte auf Deutsch. Sei knapp und präzise. Keine allgemeinen Ratschläge.\
+"""
+
+_USER_TEMPLATE = """\
+Aktuelle Marktlage NQ/CME — {timestamp}
+
+Preis: {current_price} | Spread: {spread} Punkte
+VWAP: {vwap} ({price_vs_vwap:+.1f} Punkte)
+Session: High {session_high} / Low {session_low}
+
+ORDER BOOK L2:
+- Top Bid Levels: {top_bids}
+- Top Ask Levels: {top_asks}
+- Imbalance Ratio: {imbalance_ratio:.2f} ({imbalance_direction})
+- Große Orders (>50 Kontrakte): {large_orders}
+
+SIGNAL ENGINE OUTPUT:
+- Richtung: {direction} (Konfidenz: {confidence:.0%})
+- Aktive Signale: {active_signals}
+- Vorgeschlagene Entry-Zone: {entry_low}–{entry_high}
+- Stop-Loss: {stop_loss} | Ziel 1: {target_1} | Ziel 2: {target_2}
+
+Bewerte die Situation: Bestätigst du das Signal? Gibt es Warnzeichen im Order Book?
+Antworte im Format:
+URTEIL: [BESTÄTIGT / ABGELEHNT / WARTE]
+BEGRÜNDUNG: [max 3 Sätze]
+BEACHTUNG: [ein kritischer Punkt aus dem L2 Order Book]\
+"""
+
+
+def _load_api_key() -> str:
+    cfg = configparser.ConfigParser()
+    if _CONFIG_PATH.exists():
+        cfg.read(_CONFIG_PATH)
+        key = cfg.get("anthropic", "api_key", fallback="")
+        if key and not key.startswith("YOUR_"):
+            return key
+    # Fallback to environment variable
+    import os
+    key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not key:
+        raise RuntimeError(
+            "Anthropic API key not found. Set it in config/credentials.ini "
+            "[anthropic] api_key = ... or via ANTHROPIC_API_KEY env var."
+        )
+    return key
+
+
+class ClaudeAnalyst:
+    """
+    Calls Claude for a structured trade verdict whenever the signal engine
+    produces a high-confidence, multi-signal recommendation.
+
+    Usage:
+        analyst = ClaudeAnalyst()
+        result = await analyst.analyze(signal_data)
+
+    signal_data is the combined dict passed from the main loop:
+        {
+            "recommendation": engine.to_dict(rec),   # signal engine output
+            "book_snapshot":  book.get_snapshot(),    # order book state
+            "data_snapshot":  buf.get_analysis_snapshot(),  # buffer state
+        }
+    """
+
+    def __init__(self) -> None:
+        self._client: Optional[anthropic.AsyncAnthropic] = None
+        self._last_call_ts: float = 0.0
+        self._memory: deque = deque(maxlen=_MEMORY_SIZE)
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    async def analyze(self, signal_data: dict) -> dict:
+        """
+        Evaluate whether to call Claude, build the prompt, parse the response.
+
+        Returns a result dict always — either a real Claude verdict or a
+        skip dict explaining why the call was not made.
+        """
+        rec   = signal_data.get("recommendation", {})
+        book  = signal_data.get("book_snapshot",  {})
+        data  = signal_data.get("data_snapshot",  {})
+
+        skip_reason = self._should_skip(rec)
+        if skip_reason:
+            logger.debug("Claude call skipped: %s", skip_reason)
+            return _skip_result(skip_reason)
+
+        async with self._lock:
+            # Double-check rate limit after acquiring lock
+            elapsed = time.monotonic() - self._last_call_ts
+            if elapsed < _MIN_INTERVAL:
+                wait = _MIN_INTERVAL - elapsed
+                logger.debug("Rate limit: waiting %.1fs before Claude call.", wait)
+                await asyncio.sleep(wait)
+
+            try:
+                result = await self._call_api(rec, book, data)
+            except Exception as exc:
+                logger.error("Claude API error: %s", exc)
+                return _error_result(str(exc))
+
+            self._last_call_ts = time.monotonic()
+
+        self._memory.append(result)
+        logger.info(
+            "Claude verdict: %s (conf=%.0f%%) — %s",
+            result.get("verdict"),
+            rec.get("confidence", 0) * 100,
+            result.get("begruendung", "")[:80],
+        )
+        return result
+
+    # ------------------------------------------------------------------
+    # Memory access
+    # ------------------------------------------------------------------
+
+    def get_memory(self) -> list:
+        """Return last ≤20 analysis results, newest first."""
+        return list(reversed(self._memory))
+
+    def clear_memory(self) -> None:
+        self._memory.clear()
+
+    # ------------------------------------------------------------------
+    # Guard conditions
+    # ------------------------------------------------------------------
+
+    def _should_skip(self, rec: dict) -> Optional[str]:
+        if not rec or rec.get("direction") == "NEUTRAL":
+            return "no recommendation"
+
+        confidence = rec.get("confidence", 0.0)
+        if confidence < _MIN_CONFIDENCE:
+            return f"confidence {confidence:.2f} < {_MIN_CONFIDENCE}"
+
+        signals = rec.get("signals", [])
+        unique_types = {s.get("type") for s in signals if s.get("type")}
+        if len(unique_types) < _MIN_SIGNAL_TYPES:
+            return f"only {len(unique_types)} distinct signal type(s), need {_MIN_SIGNAL_TYPES}"
+
+        # Rate limit pre-check (non-blocking, accurate check happens inside lock)
+        elapsed = time.monotonic() - self._last_call_ts
+        if elapsed < _MIN_INTERVAL:
+            return f"rate limit ({_MIN_INTERVAL - elapsed:.0f}s remaining)"
+
+        return None
+
+    # ------------------------------------------------------------------
+    # API call
+    # ------------------------------------------------------------------
+
+    async def _call_api(self, rec: dict, book: dict, data: dict) -> dict:
+        if self._client is None:
+            self._client = anthropic.AsyncAnthropic(api_key=_load_api_key())
+
+        prompt = _build_prompt(rec, book, data)
+        ts_str = _utc_now()
+
+        logger.info("[%s] Calling Claude (%s)…", ts_str, _MODEL)
+
+        message = await self._client.messages.create(
+            model=_MODEL,
+            max_tokens=_MAX_TOKENS,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        raw_text = message.content[0].text if message.content else ""
+        parsed   = _parse_response(raw_text)
+
+        return {
+            "timestamp":      ts_str,
+            "verdict":        parsed["verdict"],
+            "begruendung":    parsed["begruendung"],
+            "beachtung":      parsed["beachtung"],
+            "raw_response":   raw_text,
+            "direction":      rec.get("direction"),
+            "confidence":     rec.get("confidence"),
+            "entry_zone":     rec.get("entry_zone"),
+            "stop_loss":      rec.get("stop_loss"),
+            "target_1":       rec.get("target_1"),
+            "target_2":       rec.get("target_2"),
+            "input_tokens":   message.usage.input_tokens,
+            "output_tokens":  message.usage.output_tokens,
+            "skipped":        False,
+        }
+
+    # ------------------------------------------------------------------
+    # Seconds until next allowed call (for UI display)
+    # ------------------------------------------------------------------
+
+    def seconds_until_next_call(self) -> float:
+        elapsed = time.monotonic() - self._last_call_ts
+        return max(0.0, _MIN_INTERVAL - elapsed)
+
+
+# ------------------------------------------------------------------
+# Prompt builder
+# ------------------------------------------------------------------
+
+def _build_prompt(rec: dict, book: dict, data: dict) -> str:
+    current_price = data.get("last_price", 0.0)
+    vwap          = data.get("vwap") or 0.0
+    session_high  = data.get("session_high") or "–"
+    session_low   = data.get("session_low")  or "–"
+    spread        = book.get("spread")       or 0.0
+
+    price_vs_vwap = current_price - vwap if vwap else 0.0
+
+    # Format L2 ladder (top 5 each side)
+    bid_ladder = book.get("bid_ladder", [])[:5]
+    ask_ladder = book.get("ask_ladder", [])[:5]
+    top_bids = "  ".join(f"{lv['price']:.2f}×{lv['size']}" for lv in bid_ladder) or "–"
+    top_asks = "  ".join(f"{lv['price']:.2f}×{lv['size']}" for lv in ask_ladder) or "–"
+
+    imbalance = book.get("imbalance_ratio", 0.5)
+    imbalance_direction = (
+        "Bid-lastig (bullish)"  if imbalance > 0.60 else
+        "Ask-lastig (bearish)"  if imbalance < 0.40 else
+        "Ausgeglichen"
+    )
+
+    large_orders = book.get("large_orders", [])
+    if large_orders:
+        lo_parts = [
+            f"{o['side'].upper()} {o['size']}×{o['price']:.2f}"
+            for o in large_orders[-5:]   # last 5 to keep prompt short
+        ]
+        large_orders_str = "  ".join(lo_parts)
+    else:
+        large_orders_str = "Keine"
+
+    signals     = rec.get("signals", [])
+    active_sigs = ", ".join(
+        f"{s.get('type','?')}({s.get('confidence',0):.0%})" for s in signals
+    ) or "–"
+
+    entry_zone  = rec.get("entry_zone", {})
+    entry_low   = entry_zone.get("low",  "–")
+    entry_high  = entry_zone.get("high", "–")
+    stop_loss   = rec.get("stop_loss") or "–"
+    target_1    = rec.get("target_1")  or "–"
+    target_2    = rec.get("target_2")  or "–"
+
+    return _USER_TEMPLATE.format(
+        timestamp           = _utc_now(),
+        current_price       = f"{current_price:.2f}",
+        spread              = f"{spread:.2f}",
+        vwap                = f"{vwap:.2f}",
+        price_vs_vwap       = price_vs_vwap,
+        session_high        = session_high,
+        session_low         = session_low,
+        top_bids            = top_bids,
+        top_asks            = top_asks,
+        imbalance_ratio     = imbalance,
+        imbalance_direction = imbalance_direction,
+        large_orders        = large_orders_str,
+        direction           = rec.get("direction", "–"),
+        confidence          = rec.get("confidence", 0.0),
+        active_signals      = active_sigs,
+        entry_low           = entry_low,
+        entry_high          = entry_high,
+        stop_loss           = stop_loss,
+        target_1            = target_1,
+        target_2            = target_2,
+    )
+
+
+# ------------------------------------------------------------------
+# Response parser
+# ------------------------------------------------------------------
+
+_VERDICT_RE     = re.compile(r"URTEIL\s*:\s*(BESTÄTIGT|ABGELEHNT|WARTE)", re.IGNORECASE)
+_BEGRUENDUNG_RE = re.compile(r"BEGRÜNDUNG\s*:\s*(.+?)(?=BEACHTUNG\s*:|$)", re.DOTALL | re.IGNORECASE)
+_BEACHTUNG_RE   = re.compile(r"BEACHTUNG\s*:\s*(.+?)$", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_response(text: str) -> dict:
+    verdict_match     = _VERDICT_RE.search(text)
+    begruendung_match = _BEGRUENDUNG_RE.search(text)
+    beachtung_match   = _BEACHTUNG_RE.search(text)
+
+    verdict     = verdict_match.group(1).upper() if verdict_match else "WARTE"
+    begruendung = begruendung_match.group(1).strip() if begruendung_match else text.strip()
+    beachtung   = beachtung_match.group(1).strip()   if beachtung_match   else ""
+
+    # Normalise accented variant that some models produce
+    if "BESTATIGT" in verdict or "BESTÄTIGT" in verdict:
+        verdict = "BESTÄTIGT"
+
+    return {
+        "verdict":     verdict,
+        "begruendung": begruendung,
+        "beachtung":   beachtung,
+    }
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _skip_result(reason: str) -> dict:
+    return {
+        "timestamp":    _utc_now(),
+        "verdict":      "ÜBERSPRUNGEN",
+        "begruendung":  reason,
+        "beachtung":    "",
+        "raw_response": "",
+        "skipped":      True,
+        "skip_reason":  reason,
+    }
+
+
+def _error_result(error: str) -> dict:
+    return {
+        "timestamp":    _utc_now(),
+        "verdict":      "FEHLER",
+        "begruendung":  error,
+        "beachtung":    "",
+        "raw_response": "",
+        "skipped":      False,
+        "error":        error,
+    }
