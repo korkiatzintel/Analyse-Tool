@@ -119,9 +119,11 @@ class ClaudeAnalyst:
         Returns a result dict always — either a real Claude verdict or a
         skip dict explaining why the call was not made.
         """
-        rec   = signal_data.get("recommendation", {})
-        book  = signal_data.get("book_snapshot",  {})
-        data  = signal_data.get("data_snapshot",  {})
+        rec       = signal_data.get("recommendation", {})
+        # Auto-detect data source: free mode if free_snapshot key present
+        free_snap = signal_data.get("free_snapshot")
+        book      = signal_data.get("book_snapshot", {})
+        data      = signal_data.get("data_snapshot", {})
 
         skip_reason = self._should_skip(rec)
         if skip_reason:
@@ -137,7 +139,7 @@ class ClaudeAnalyst:
                 await asyncio.sleep(wait)
 
             try:
-                result = await self._call_api(rec, book, data)
+                result = await self._call_api(rec, book, data, free_snap=free_snap)
             except Exception as exc:
                 logger.error("Claude API error: %s", exc)
                 return _error_result(str(exc))
@@ -192,11 +194,21 @@ class ClaudeAnalyst:
     # API call
     # ------------------------------------------------------------------
 
-    async def _call_api(self, rec: dict, book: dict, data: dict) -> dict:
+    async def _call_api(
+        self,
+        rec: dict,
+        book: dict,
+        data: dict,
+        free_snap: Optional[dict] = None,
+    ) -> dict:
         if self._client is None:
             self._client = anthropic.AsyncAnthropic(api_key=_load_api_key())
 
-        prompt = _build_prompt(rec, book, data)
+        prompt = (
+            _build_free_prompt(rec, free_snap)
+            if free_snap
+            else _build_prompt(rec, book, data)
+        )
         ts_str = _utc_now()
 
         logger.info("[%s] Calling Claude (%s)…", ts_str, _MODEL)
@@ -344,6 +356,130 @@ def _parse_response(text: str) -> dict:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+_FREE_USER_TEMPLATE = """\
+Aktuelle Marktlage NQ Futures — {timestamp}
+
+PREIS & SESSION:
+Preis: {current_price} | Session: {session_change:+.2f}% | vs VWAP: {vs_vwap:+.1f} Pkt
+Session High: {session_high} / Low: {session_low} | VWAP: {vwap}
+Overnight Gap: {gap_str}
+
+MULTI-TIMEFRAME ANALYSE:
+5min:  EMA9 {ema9_5m} {cmp_5m} EMA21 {ema21_5m} → {bias_5m}
+15min: EMA9 {ema9_15m} {cmp_15m} EMA21 {ema21_15m} → {bias_15m}
+
+MARKTREGIME:
+VIX: {vix:.1f} ({vix_regime}) | 10j Yield: {yield_str}
+Wirtschaftskalender: {calendar_str}
+
+SIGNAL ENGINE OUTPUT:
+Richtung: {direction} (Konfidenz: {confidence:.0%})
+Aktive Signale: {active_signals}
+Entry-Zone: {entry_low}–{entry_high}
+Stop-Loss: {stop_loss} | Ziel 1: {target_1} | Ziel 2: {target_2}
+
+Bewerte die Situation: Bestätigst du das Signal?
+Antworte im Format:
+URTEIL: [BESTÄTIGT / ABGELEHNT / WARTE]
+BEGRÜNDUNG: [max 3 Sätze]
+BEACHTUNG: [ein kritischer Punkt — z.B. VIX-Niveau, Event-Risiko oder TF-Konflikt]\
+"""
+
+
+def _build_free_prompt(rec: dict, free_snap: dict) -> str:
+    if not free_snap:
+        free_snap = {}
+
+    price          = free_snap.get("last_price", 0.0)
+    vwap           = free_snap.get("session_vwap") or 0.0
+    session_high   = free_snap.get("session_high") or "–"
+    session_low    = free_snap.get("session_low")  or "–"
+    session_chg    = free_snap.get("session_change_pct", 0.0)
+    vs_vwap        = price - vwap if vwap else 0.0
+    vix            = free_snap.get("vix", 0.0)
+    vix_regime     = free_snap.get("vix_regime", "unknown")
+    yield_10y      = free_snap.get("yield_10y", 0.0)
+
+    # Gap description
+    gap_pct = free_snap.get("overnight_gap_pct", 0.0)
+    gap_dir = free_snap.get("overnight_gap_dir", "none")
+    if gap_dir != "none":
+        gap_str = f"{gap_dir.upper()} {abs(gap_pct):.2f}% (Fill-Ziel: {free_snap.get('yesterday_close', 0):.2f})"
+    else:
+        gap_str = "Kein signifikanter Gap"
+
+    # EMAs from signal metadata
+    ema9_5m = ema21_5m = ema9_15m = ema21_15m = "?"
+    bias_5m = bias_15m = "–"
+    cmp_5m = cmp_15m = "≈"
+    for sig in rec.get("signals", []):
+        if sig.get("type") == "MULTI_TF_BIAS":
+            md = sig.get("metadata", {})
+            if "ema9_5m" in md:
+                ema9_5m   = f"{md['ema9_5m']:.2f}"
+                ema21_5m  = f"{md['ema21_5m']:.2f}"
+                ema9_15m  = f"{md['ema9_15m']:.2f}"
+                ema21_15m = f"{md['ema21_15m']:.2f}"
+                _d5  = md["ema9_5m"]  - md["ema21_5m"]
+                _d15 = md["ema9_15m"] - md["ema21_15m"]
+                cmp_5m   = ">" if _d5  > 0 else "<"
+                cmp_15m  = ">" if _d15 > 0 else "<"
+                bias_5m  = "BULLISH" if _d5  > 0 else "BEARISH"
+                bias_15m = "BULLISH" if _d15 > 0 else "BEARISH"
+            break
+
+    # Calendar
+    upcoming = [e for e in free_snap.get("upcoming_events", []) if e.get("impact") == "high"]
+    if upcoming:
+        calendar_str = " | ".join(
+            f"{e.get('name','')} in {e.get('minutes_away', '?'):.0f} min"
+            for e in upcoming[:3]
+        )
+    elif free_snap.get("event_window_active"):
+        calendar_str = "Post-Event Wartezeit aktiv"
+    else:
+        calendar_str = "Keine High-Impact Events heute"
+
+    yield_str = f"{yield_10y:.2f}%" if yield_10y else "–"
+
+    # Signal engine fields
+    signals    = rec.get("signals", [])
+    active_str = ", ".join(
+        f"{s.get('type','?')}({s.get('confidence',0):.0%})" for s in signals
+    ) or "–"
+    entry_zone = rec.get("entry_zone", {})
+    entry_low  = entry_zone.get("low",  "–")
+    entry_high = entry_zone.get("high", "–")
+    sl         = rec.get("stop_loss") or "–"
+    t1         = rec.get("target_1")  or "–"
+    t2         = rec.get("target_2")  or "–"
+
+    return _FREE_USER_TEMPLATE.format(
+        timestamp      = _utc_now(),
+        current_price  = f"{price:.2f}",
+        session_change = session_chg,
+        vs_vwap        = vs_vwap,
+        vwap           = f"{vwap:.2f}" if vwap else "–",
+        session_high   = f"{session_high:.2f}" if isinstance(session_high, float) else session_high,
+        session_low    = f"{session_low:.2f}"  if isinstance(session_low,  float) else session_low,
+        gap_str        = gap_str,
+        ema9_5m        = ema9_5m,   cmp_5m  = cmp_5m,  ema21_5m  = ema21_5m,  bias_5m  = bias_5m,
+        ema9_15m       = ema9_15m,  cmp_15m = cmp_15m, ema21_15m = ema21_15m, bias_15m = bias_15m,
+        vix            = vix,
+        vix_regime     = vix_regime.upper(),
+        yield_str      = yield_str,
+        calendar_str   = calendar_str,
+        direction      = rec.get("direction", "–"),
+        confidence     = rec.get("confidence", 0.0),
+        active_signals = active_str,
+        entry_low      = f"{entry_low:.2f}" if isinstance(entry_low, float) else entry_low,
+        entry_high     = f"{entry_high:.2f}" if isinstance(entry_high, float) else entry_high,
+        stop_loss      = f"{sl:.2f}" if isinstance(sl, float) else sl,
+        target_1       = f"{t1:.2f}" if isinstance(t1, float) else t1,
+        target_2       = f"{t2:.2f}" if isinstance(t2, float) else t2,
+    )
 
 
 def _skip_result(reason: str) -> dict:

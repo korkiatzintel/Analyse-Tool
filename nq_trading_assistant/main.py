@@ -56,11 +56,12 @@ try:
     from core.rithmic_client import RithmicConnectionManager
     _RITHMIC_AVAILABLE = True
 except ImportError as _e:
-    logger.warning("async_rithmic not installed (%s) — running in demo mode.", _e)
+    logger.warning("async_rithmic not installed (%s) — L2 mode unavailable.", _e)
     _RITHMIC_AVAILABLE = False
 
 from core.order_book import OrderBook
 from core.data_buffer import DataBuffer
+from core.free_data_client import FreeDataClient
 from signals.order_flow import OrderFlowAnalyzer
 from signals.signal_engine import SignalEngine
 from ai.claude_analyst import ClaudeAnalyst
@@ -189,80 +190,106 @@ async def _stream_live() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Demo mode — synthetic NQ data when Rithmic is unavailable
+# Free-data mode — yfinance + FRED + economic calendar
+# ---------------------------------------------------------------------------
+
+async def _stream_free() -> None:
+    """
+    Use FreeDataClient (yfinance / FRED / calendar) as the data source.
+    Evaluates signals via SignalEngine.evaluate_multi_tf() and passes
+    free_snapshot to ClaudeAnalyst for the adapted prompt.
+    """
+    client = FreeDataClient()
+
+    async def on_tick(tick: dict) -> None:
+        await _on_tick(tick)
+
+    async def on_time_bar(bar: dict) -> None:
+        try:
+            _APP.data_buffer.on_time_bar(bar)
+        except Exception:
+            logger.exception("FreeDataClient on_time_bar DataBuffer error")
+
+    async def on_market_context(ctx: dict) -> None:
+        """Full evaluation cycle triggered on every poll (60s)."""
+        try:
+            free_snap = client.get_snapshot()
+            rec = _APP.signal_engine.evaluate_multi_tf(free_snap)
+            _APP.last_rec = _APP.signal_engine.to_dict(rec)
+            _APP.contract = "NQ=F (yfinance)"
+            _APP.connected = True
+
+            if rec is not None:
+                result = await _APP.claude.analyze({
+                    "recommendation": _APP.last_rec,
+                    "free_snapshot":  free_snap,
+                })
+                if not result.get("skipped"):
+                    _APP.last_claude = result
+                    _log_verdict(result)
+        except Exception:
+            logger.exception("Free-data signal/AI pipeline error — continuing.")
+
+    client.on_tick           = on_tick
+    client.on_time_bar       = on_time_bar
+    client.on_market_context = on_market_context
+
+    try:
+        await client.start_streaming()
+    finally:
+        _APP.connected = False
+
+
+# ---------------------------------------------------------------------------
+# Synthetic demo mode (no network required)
 # ---------------------------------------------------------------------------
 
 async def _stream_demo() -> None:
     """
-    Generate synthetic NQ tick / book / bar data so the pipeline and UI
-    stay exercised without a live Rithmic connection.
+    Generate synthetic NQ data for UI testing without any network access.
+    Falls back automatically if yfinance is unavailable.
     """
     import random
-    from datetime import datetime, timezone
 
-    logger.info("Demo mode: generating synthetic NQ data.")
+    logger.info("Synthetic demo mode: generating fake NQ data.")
     _APP.connected = True
-    _APP.contract  = "NQM5 (demo)"
+    _APP.contract  = "NQM5 (synthetic)"
 
-    price   = 19_000.0
-    ts      = int(datetime.now(timezone.utc).timestamp())
-    bar_vol = 0
-    bar_buy = 0
-    bar_sell = 0
+    price    = 19_000.0
+    ts       = int(__import__("time").time())
     bar_open = price
 
     while True:
         try:
-            # --- Tick ---
-            move  = random.gauss(0, 0.5)
-            price = round(max(18_000.0, price + move), 2)
-            ts   += 1
-            side  = "B" if random.random() > 0.48 else "S"
-            vol   = random.randint(1, 15)
+            price  = round(max(18_000.0, price + random.gauss(0, 0.5)), 2)
+            ts    += 1
+            vol    = random.randint(1, 15)
+            side   = "B" if random.random() > 0.48 else "S"
 
-            tick = {
-                "type": "tick", "symbol": "NQM5",
-                "price": price, "volume": vol,
-                "side": side, "timestamp": ts,
-            }
-            await _on_tick(tick)
+            await _on_tick({"type": "tick", "symbol": "NQM5",
+                            "price": price, "volume": vol,
+                            "side": side, "timestamp": ts})
 
-            bar_vol  += vol
-            bar_open  = bar_open or price
-            if side == "B":
-                bar_buy += vol
-            else:
-                bar_sell += vol
-
-            # --- Order book update (every tick) ---
             bids, asks = _gen_demo_book(price)
-            await _on_order_book({
-                "type": "order_book", "update_type": "SOLO",
-                "symbol": "NQM5", "timestamp": ts,
-                "bids": bids, "asks": asks,
-            })
+            await _on_order_book({"type": "order_book", "update_type": "SOLO",
+                                  "symbol": "NQM5", "timestamp": ts,
+                                  "bids": bids, "asks": asks})
 
-            # --- 1-second bar (every ~10 ticks ≈ 1s at 10Hz) ---
             if ts % 10 == 0:
-                bar = {
+                await _on_time_bar({
                     "type": "time_bar", "symbol": "NQM5",
-                    "open":  bar_open,
-                    "high":  price + random.uniform(0, 2),
-                    "low":   price - random.uniform(0, 2),
-                    "close": price,
-                    "volume": bar_vol,
-                    "timestamp": ts,
-                }
-                await _on_time_bar(bar)
-                bar_vol = bar_buy = bar_sell = 0
+                    "open":  bar_open,  "high": price + random.uniform(0, 2),
+                    "low":   price - random.uniform(0, 2), "close": price,
+                    "volume": vol * 10, "timestamp": ts,
+                })
                 bar_open = price
 
-            await asyncio.sleep(0.1)   # ~10 ticks/sec
+            await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
             break
         except Exception:
-            logger.exception("Demo stream error")
+            logger.exception("Synthetic demo error")
             await asyncio.sleep(1)
 
     _APP.connected = False
@@ -365,8 +392,13 @@ async def _shutdown_hook() -> None:
 # Main async entry point
 # ---------------------------------------------------------------------------
 
-async def _async_main(demo: bool) -> None:
-    stream_coro = _stream_demo() if demo else _stream_live()
+async def _async_main(mode: str) -> None:
+    if mode == "live":
+        stream_coro = _stream_live()
+    elif mode == "free":
+        stream_coro = _stream_free()
+    else:
+        stream_coro = _stream_demo()
 
     try:
         # Run streaming + shutdown watcher concurrently.
@@ -402,39 +434,46 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python main.py              # live Rithmic + Streamlit UI\n"
+            "  python main.py              # yfinance free-data + Streamlit UI\n"
+            "  python main.py --live       # live Rithmic L2 data\n"
+            "  python main.py --demo       # synthetic data, no network needed\n"
             "  python main.py --no-ui      # headless, engine only\n"
-            "  python main.py --demo       # synthetic data, no Rithmic needed\n"
         ),
     )
-    parser.add_argument("--no-ui",  action="store_true", help="Skip Streamlit dashboard")
-    parser.add_argument("--demo",   action="store_true", help="Force demo / synthetic data mode")
+    parser.add_argument("--no-ui", action="store_true", help="Skip Streamlit dashboard")
+    parser.add_argument("--live",  action="store_true", help="Use Rithmic L2 (requires credentials)")
+    parser.add_argument("--demo",  action="store_true", help="Synthetic data mode, no network")
     args = parser.parse_args()
 
-    # Decide whether to use demo mode
-    demo = args.demo or not _RITHMIC_AVAILABLE
-    if demo and not args.demo:
-        logger.info("async_rithmic unavailable — switching to demo mode automatically.")
+    # Determine run mode: free (default) → live → demo (fallback)
+    if args.demo:
+        mode = "demo"
+    elif args.live:
+        if not _RITHMIC_AVAILABLE:
+            logger.warning("--live requested but async_rithmic not installed — using free mode.")
+            mode = "free"
+        else:
+            mode = "live"
+    else:
+        mode = "free"   # default: yfinance + FRED + calendar
 
     logger.info("=" * 60)
     logger.info("NQ Trading Assistant starting up")
-    logger.info("  Mode    : %s", "DEMO" if demo else "LIVE (Rithmic)")
+    logger.info("  Mode    : %s", mode.upper())
     logger.info("  UI      : %s", "disabled" if args.no_ui else "http://localhost:8501")
     logger.info("  Log     : %s", _LOG_FILE)
     logger.info("=" * 60)
 
-    # Start Streamlit in a child process (non-blocking)
     ui_proc = None
     if not args.no_ui:
         ui_proc = _start_dashboard()
 
-    # Build and run the asyncio event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     _install_signal_handlers(loop)
 
     try:
-        loop.run_until_complete(_async_main(demo=demo))
+        loop.run_until_complete(_async_main(mode=mode))
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt caught in main thread.")
     finally:

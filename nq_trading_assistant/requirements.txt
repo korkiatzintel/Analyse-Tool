@@ -1,12 +1,18 @@
-# Rithmic connectivity
+# Rithmic connectivity (optional — app runs in free-data mode without it)
 async_rithmic>=0.2.0
 
 # Data processing
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Technical analysis (pandas-ta as talib fallback)
+# Technical analysis (pandas-ta preferred; native fallbacks used if absent)
 pandas-ta>=0.3.14b
+
+# Free market data
+yfinance>=0.2.40
+requests>=2.31.0
+beautifulsoup4>=4.12.0   # economic calendar scraping
+fredapi>=0.5.0           # optional FRED macro data (requires free API key)
 
 # UI
 streamlit>=1.35.0

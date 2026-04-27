@@ -24,6 +24,14 @@ from signals.technical import (
     TechnicalAnalyzer,
     compute_atr,
 )
+from signals.free_signals import (
+    MULTI_TF_BIAS,
+    VIX_REGIME,
+    OVERNIGHT_GAP,
+    CALENDAR_FILTER,
+    FreeMarketAnalyzer,
+    _VIX_HIGH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +51,8 @@ _WEIGHTS: Dict[str, float] = {
 }
 
 _MIN_CONFIDENCE      = 0.65   # below this → no trade
-_MIN_SIGNALS         = 2      # need at least N agreeing signals
+_MIN_SIGNALS         = 2      # need at least N agreeing signals (L2 mode)
+_MIN_SIGNALS_FREE    = 3      # confluence: need 3 for free-data mode
 _RISK_REWARD_T1      = 1.5    # Target 1 = 1.5 × risk
 _RISK_REWARD_T2      = 2.5    # Target 2 = 2.5 × risk
 _FALLBACK_ATR        = 8.0    # NQ points — used when ATR unavailable
@@ -71,9 +80,24 @@ class SignalEngine:
     Single public method: evaluate(book_snap, data_snap) → TradeRecommendation | None
     """
 
+    # Per-signal weights for free-data mode
+    _FREE_WEIGHTS: Dict[str, float] = {
+        MULTI_TF_BIAS:   1.6,   # primary directional signal
+        OVERNIGHT_GAP:   1.3,
+        FAIR_VALUE_GAP:  1.2,
+        EMA_TREND:       0.9,
+        RSI_EXTREME:     1.0,
+        VWAP_POSITION:   0.8,
+        SESSION_LEVELS:  0.7,
+        # Blocking signals — weight not used but listed for completeness
+        VIX_REGIME:      0.0,
+        CALENDAR_FILTER: 0.0,
+    }
+
     def __init__(self) -> None:
-        self._of_analyzer = OrderFlowAnalyzer()
-        self._ta_analyzer  = TechnicalAnalyzer()
+        self._of_analyzer   = OrderFlowAnalyzer()
+        self._ta_analyzer   = TechnicalAnalyzer()
+        self._free_analyzer = FreeMarketAnalyzer()
 
     def evaluate(
         self,
@@ -172,34 +196,6 @@ class SignalEngine:
         }
 
     # ------------------------------------------------------------------
-    # Scoring
-    # ------------------------------------------------------------------
-
-    def _score_signals(self, signals: List[Signal]):
-        bull_score = 0.0
-        bear_score = 0.0
-        bull_sigs  = []
-        bear_sigs  = []
-
-        for sig in signals:
-            sig_type = (
-                sig.signal_type.value
-                if hasattr(sig.signal_type, "value")
-                else str(sig.signal_type)
-            )
-            weight = _WEIGHTS.get(sig_type, 1.0)
-            weighted = sig.confidence * weight
-
-            if sig.direction in (Direction.BULLISH, "BULLISH"):
-                bull_score += weighted
-                bull_sigs.append(sig)
-            elif sig.direction in (Direction.BEARISH, "BEARISH"):
-                bear_score += weighted
-                bear_sigs.append(sig)
-
-        return bull_score, bear_score, bull_sigs, bear_sigs
-
-    # ------------------------------------------------------------------
     # Entry zone from L2 liquidity clusters
     # ------------------------------------------------------------------
 
@@ -292,6 +288,191 @@ class SignalEngine:
             f"T2={target_2:.2f} | "
             f"Signals: [{sig_names}]"
         )
+
+
+    # ==================================================================
+    # Free-data path (yfinance + FRED + calendar)
+    # ==================================================================
+
+    def evaluate_multi_tf(
+        self, free_snap: dict
+    ) -> Optional[TradeRecommendation]:
+        """
+        Evaluate signals using multi-timeframe yfinance data.
+
+        Blocking conditions checked first:
+          - VIX > 30   → return None
+          - High-impact event within 30 min → return None
+
+        CONFLUENCE_SCORE: requires _MIN_SIGNALS_FREE (3) agreeing signals.
+        """
+        all_signals = self._free_analyzer.analyze(free_snap)
+
+        # Hard block: any signal with block=True stops the pipeline
+        for sig in all_signals:
+            if sig.metadata.get("block"):
+                logger.info(
+                    "Signal pipeline blocked: %s — %s",
+                    sig.signal_type, sig.description,
+                )
+                return None
+
+        # Apply VIX dampening: if VIX is high (25–30), lower all confidences by 20%
+        vix = free_snap.get("vix", 0.0)
+        if vix > _VIX_HIGH:
+            all_signals = _dampen_confidence(all_signals, factor=0.80)
+
+        # Add technical signals using 5m bars
+        data_snap_5m = _free_snap_to_data_snap(free_snap)
+        ta_signals   = self._ta_analyzer.analyze(data_snap_5m)
+        all_signals  = all_signals + ta_signals
+
+        if not all_signals:
+            return None
+
+        # Weighted directional vote using free-data weights
+        bull_score, bear_score, bull_sigs, bear_sigs = self._score_signals(
+            all_signals, weights=self._FREE_WEIGHTS
+        )
+        net_score    = bull_score - bear_score
+        total_weight = bull_score + bear_score if (bull_score + bear_score) > 0 else 1.0
+
+        if abs(net_score) == 0:
+            return None
+
+        direction, winning_sigs = (
+            ("LONG",  bull_sigs) if net_score > 0 else
+            ("SHORT", bear_sigs)
+        )
+
+        # CONFLUENCE_SCORE: need at least 3 distinct signal types
+        unique_types = {
+            str(s.signal_type.value if hasattr(s.signal_type, "value") else s.signal_type)
+            for s in winning_sigs
+        }
+        if len(unique_types) < _MIN_SIGNALS_FREE:
+            return None
+
+        confidence = min(abs(net_score) / total_weight, 1.0)
+        if confidence < _MIN_CONFIDENCE:
+            return None
+
+        last_price = free_snap.get("last_price", 0.0)
+        bars_5m    = free_snap.get("bars_5m", [])
+        atr        = compute_atr(bars_5m) or _FALLBACK_ATR
+
+        entry_zone = self._swing_entry_zone(free_snap, direction, last_price)
+        entry_ref  = (entry_zone["low"] + entry_zone["high"]) / 2
+        stop_loss, target_1, target_2 = self._risk_levels(direction, entry_ref, atr)
+
+        reasoning = self._build_reasoning(
+            direction, confidence, winning_sigs, entry_zone,
+            stop_loss, target_1, target_2, atr, last_price,
+        )
+
+        return TradeRecommendation(
+            direction   = direction,
+            confidence  = round(confidence, 3),
+            signals     = [_signal_to_dict(s) for s in winning_sigs],
+            entry_zone  = entry_zone,
+            stop_loss   = stop_loss,
+            target_1    = target_1,
+            target_2    = target_2,
+            atr         = round(atr, 2),
+            reasoning   = reasoning,
+            raw_score   = round(abs(net_score), 3),
+        )
+
+    def _swing_entry_zone(
+        self, free_snap: dict, direction: str, last_price: float
+    ) -> Dict[str, float]:
+        """Entry zone derived from recent swing high / low on 5m bars."""
+        bars = free_snap.get("bars_5m", [])
+        vwap = free_snap.get("session_vwap") or last_price
+
+        if not bars or not last_price:
+            return {"low": round(last_price - 2.0, 2), "high": round(last_price + 2.0, 2)}
+
+        recent = bars[-12:]   # last 60 min of 5m bars
+
+        if direction == "LONG":
+            lows = [b["low"] for b in recent if b["low"] < last_price]
+            support    = max(lows) if lows else last_price - 2.0
+            entry_low  = min(support, last_price)
+            entry_high = max(support + 1.0, last_price)
+            return {"low": round(entry_low, 2), "high": round(entry_high, 2)}
+        else:
+            highs = [b["high"] for b in recent if b["high"] > last_price]
+            resistance = min(highs) if highs else last_price + 2.0
+            entry_low  = min(last_price, resistance - 1.0)
+            entry_high = max(last_price, resistance)
+            return {"low": round(entry_low, 2), "high": round(entry_high, 2)}
+
+    def _score_signals(self, signals: List[Signal], weights: Optional[Dict] = None):
+        """Weighted directional vote. Uses _WEIGHTS (L2) or caller-supplied weights."""
+        w = weights if weights is not None else _WEIGHTS
+        bull_score = 0.0
+        bear_score = 0.0
+        bull_sigs  = []
+        bear_sigs  = []
+
+        for sig in signals:
+            sig_type = (
+                sig.signal_type.value
+                if hasattr(sig.signal_type, "value")
+                else str(sig.signal_type)
+            )
+            weight   = w.get(sig_type, 1.0)
+            weighted = sig.confidence * weight
+
+            if sig.direction in (Direction.BULLISH, "BULLISH"):
+                bull_score += weighted
+                bull_sigs.append(sig)
+            elif sig.direction in (Direction.BEARISH, "BEARISH"):
+                bear_score += weighted
+                bear_sigs.append(sig)
+
+        return bull_score, bear_score, bull_sigs, bear_sigs
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def _dampen_confidence(signals: List[Signal], factor: float) -> List[Signal]:
+    """Return a new list with every signal's confidence multiplied by factor."""
+    dampened = []
+    for sig in signals:
+        d = Signal.__new__(Signal)
+        object.__setattr__(d, "signal_type",  sig.signal_type)
+        object.__setattr__(d, "direction",    sig.direction)
+        object.__setattr__(d, "confidence",   round(sig.confidence * factor, 3))
+        object.__setattr__(d, "description",  sig.description)
+        object.__setattr__(d, "metadata",     sig.metadata)
+        dampened.append(d)
+    return dampened
+
+
+def _free_snap_to_data_snap(free_snap: dict) -> dict:
+    """
+    Translate a FreeDataClient snapshot into the data_snap format that
+    TechnicalAnalyzer expects, using 5m bars as the "minute_bars" series.
+    """
+    return {
+        "last_price":   free_snap.get("last_price", 0.0),
+        "vwap":         free_snap.get("session_vwap"),
+        "session_high": free_snap.get("session_high"),
+        "session_low":  free_snap.get("session_low"),
+        "minute_bars":  free_snap.get("bars_5m", []),   # 5m → TechnicalAnalyzer
+        "second_bars":  free_snap.get("bars_1m", []),   # 1m → EMA base
+        "second_bar_count": len(free_snap.get("bars_1m", [])),
+        "minute_bar_count": len(free_snap.get("bars_5m", [])),
+        "cumulative_delta_session": 0,
+        "cumulative_delta_last10":  0,
+        "cumulative_delta_last1":   0,
+        "recent_tick_stats": {},
+        "tick_count": 0,
+    }
 
 
 # ------------------------------------------------------------------
