@@ -17,12 +17,16 @@ the Streamlit subprocess is terminated, and the asyncio loop exits.
 
 import argparse
 import asyncio
+import collections
+import json
 import logging
 import os
 import signal
 import subprocess
 import sys
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -31,7 +35,9 @@ from pathlib import Path
 
 _LOG_DIR = Path(__file__).parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
-_LOG_FILE = _LOG_DIR / "app.log"
+_LOG_FILE     = _LOG_DIR / "app.log"
+_STATE_FILE   = _LOG_DIR / "ui_state.json"    # read by dashboard.py
+_COMMAND_FILE = _LOG_DIR / "ui_command.json"  # written by dashboard.py "force" button
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,12 +87,17 @@ class AppComponents:
         self.claude       = ClaudeAnalyst()
         self.rithmic: "RithmicConnectionManager | None" = None
 
-        # Most recent outputs — read by the UI process via shared-memory or
-        # simply via its own independently initialised components.
+        # Most recent outputs — shared with the UI process via _STATE_FILE.
         self.last_rec:    dict = {}
         self.last_claude: dict = {}
         self.connected:   bool = False
         self.contract:    str  = "–"
+        self.mode:        str  = "demo"
+
+        # Free-data extras (populated by _stream_free on_market_context)
+        self.last_free_snap:    dict                = {}
+        self.last_free_poll_ts: float               = 0.0
+        self.delta_history:     collections.deque   = collections.deque(maxlen=120)
 
 
 _APP = AppComponents()
@@ -155,6 +166,8 @@ async def _evaluate_and_analyze() -> None:
                 _APP.last_claude = result
                 _log_verdict(result)
 
+        _write_ui_state()
+
     except Exception:
         logger.exception("Signal/AI pipeline error — continuing.")
 
@@ -168,6 +181,91 @@ def _log_verdict(result: dict) -> None:
         verdict, direction, conf * 100,
         result.get("begruendung", "")[:120],
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared UI state writer
+# ---------------------------------------------------------------------------
+
+def _write_ui_state() -> None:
+    """
+    Atomically serialize current app state to _STATE_FILE so the Streamlit
+    dashboard can read it on every 5-second rerun cycle.
+
+    Uses a .tmp → rename pattern so the dashboard never reads a partial file.
+    """
+    try:
+        book_snap = _APP.order_book.get_snapshot()
+        data_snap = _APP.data_buffer.get_analysis_snapshot()
+        free      = _APP.last_free_snap   # {} when not in free mode
+
+        # Rolling delta history (cumulative delta of last completed 1s bar)
+        _APP.delta_history.append(data_snap.get("cumulative_delta_last1", 0))
+
+        # Time until next yfinance poll (free mode only)
+        next_update_in = None
+        if _APP.mode == "free" and _APP.last_free_poll_ts:
+            elapsed = time.monotonic() - _APP.last_free_poll_ts
+            next_update_in = round(max(0.0, 60.0 - elapsed), 1)
+
+        # Prefer free-data session metrics when available (more accurate)
+        last_price = free.get("last_price") or data_snap.get("last_price", 0.0)
+        vwap       = free.get("session_vwap") or data_snap.get("vwap")
+        s_high     = free.get("session_high") or data_snap.get("session_high")
+        s_low      = free.get("session_low")  or data_snap.get("session_low")
+
+        state = {
+            "mode":             _APP.mode,
+            "contract":         _APP.contract,
+            "connected":        _APP.connected,
+            "last_update":      datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "next_update_in":   next_update_in,
+            "market": {
+                "last_price":      last_price,
+                "vwap":            vwap,
+                "session_high":    s_high,
+                "session_low":     s_low,
+                "spread":          book_snap.get("spread"),
+                "imbalance_ratio": book_snap.get("imbalance_ratio", 0.5),
+                "bid_ladder":      book_snap.get("bid_ladder", [])[:5],
+                "ask_ladder":      book_snap.get("ask_ladder", [])[:5],
+            },
+            "signals":                   _APP.last_rec,
+            "claude":                    _APP.last_claude,
+            "claude_memory":             _APP.claude.get_memory()[:5],
+            "vix":                       free.get("vix", 0.0),
+            "vix_regime":                free.get("vix_regime", "unknown"),
+            "yield_10y":                 free.get("yield_10y", 0.0),
+            "upcoming_events":           free.get("upcoming_events", []),
+            "event_window_active":       free.get("event_window_active", False),
+            "minutes_to_next_event":     free.get("minutes_to_next_event"),
+            "delta_history":             list(_APP.delta_history),
+        }
+
+        tmp = _STATE_FILE.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(state, fh, default=str)
+        tmp.replace(_STATE_FILE)
+
+    except Exception:
+        logger.debug("_write_ui_state failed", exc_info=True)
+
+
+def _read_command() -> dict:
+    """
+    Read and consume the UI command file written by dashboard.py's
+    'Jetzt analysieren' button. Returns {} if no command is pending.
+    """
+    try:
+        if not _COMMAND_FILE.exists():
+            return {}
+        with _COMMAND_FILE.open("r", encoding="utf-8") as f:
+            cmd = json.load(f)
+        _COMMAND_FILE.unlink(missing_ok=True)
+        return cmd
+    except Exception:
+        return {}
+
 
 # ---------------------------------------------------------------------------
 # Rithmic streaming coroutine
@@ -218,6 +316,8 @@ async def _stream_free() -> None:
             _APP.last_rec = _APP.signal_engine.to_dict(rec)
             _APP.contract = "NQ=F (yfinance)"
             _APP.connected = True
+            _APP.last_free_snap    = free_snap
+            _APP.last_free_poll_ts = time.monotonic()
 
             if rec is not None:
                 result = await _APP.claude.analyze({
@@ -227,6 +327,8 @@ async def _stream_free() -> None:
                 if not result.get("skipped"):
                     _APP.last_claude = result
                     _log_verdict(result)
+
+            _write_ui_state()
         except Exception:
             logger.exception("Free-data signal/AI pipeline error — continuing.")
 
@@ -283,6 +385,7 @@ async def _stream_demo() -> None:
                     "volume": vol * 10, "timestamp": ts,
                 })
                 bar_open = price
+                _write_ui_state()
 
             await asyncio.sleep(0.1)
 
@@ -393,6 +496,7 @@ async def _shutdown_hook() -> None:
 # ---------------------------------------------------------------------------
 
 async def _async_main(mode: str) -> None:
+    _APP.mode = mode
     if mode == "live":
         stream_coro = _stream_live()
     elif mode == "free":
