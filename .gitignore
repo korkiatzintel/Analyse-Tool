@@ -1,5 +1,7 @@
-# Credentials — never commit
+# Credentials & secrets — never commit
+.env
 nq_trading_assistant/config/credentials.ini
+*.ini
 
 # Python
 __pycache__/
@@ -27,5 +29,6 @@ env/
 # Streamlit
 .streamlit/secrets.toml
 
-# Runtime logs
-nq_trading_assistant/logs/*.log
+# Runtime logs & shared state
+nq_trading_assistant/logs/
+*.log

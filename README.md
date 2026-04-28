@@ -1,11 +1,46 @@
 # NQ Futures Day Trading Assistant
 
 KI-gestützte Echtzeit-Analyse für E-Mini Nasdaq 100 (NQ) Futures mit
-Rithmic Level 2 Order Flow Daten und Claude AI.
+Claude AI — drei Betriebsmodi, kein Rithmic-Account für den Start nötig.
 
 > ⚠️ **Wichtiger Hinweis: Dieses Tool führt KEINE Orders aus.**
 > Es ist ausschließlich für Paper Trading und Analyse-Zwecke gedacht.
 > Alle Signale sind informativ — keine automatische Order-Ausführung.
+
+---
+
+## Betriebsmodi
+
+| Modus | Befehl | Benötigt | Datenquelle |
+|---|---|---|---|
+| **Free** (Standard) | `python main.py` | `ANTHROPIC_API_KEY` | yfinance (1m/5m/15m) + FRED + Kalender |
+| **Demo** | `python main.py --demo` | – | Synthetische NQ-Daten, kein Netzwerk |
+| **Live** | `python main.py --live` | Rithmic-Account + `ANTHROPIC_API_KEY` | Rithmic L2 Order Book (Echtzeit) |
+
+---
+
+## Quick Start (Free Mode)
+
+```bash
+git clone <repo-url>
+cd nq_trading_assistant
+
+# Abhängigkeiten
+pip install -r requirements.txt
+
+# API Key setzen
+cp ../.env.example ../.env
+# .env öffnen und ANTHROPIC_API_KEY eintragen
+
+# Starten — Dashboard öffnet sich auf http://localhost:8501
+python main.py
+```
+
+Für einen ersten Test **ohne** API Key:
+
+```bash
+python main.py --demo   # synthetische Daten, kein Account nötig
+```
 
 ---
 
@@ -14,9 +49,9 @@ Rithmic Level 2 Order Flow Daten und Claude AI.
 | Komponente | Mindestversion | Hinweis |
 |---|---|---|
 | Python | 3.11+ | |
-| Rithmic Account | – | CME L2 Market Depth Entitlement erforderlich |
-| Anthropic API Key | – | [console.anthropic.com](https://console.anthropic.com) |
-| Rithmic System | Rithmic Test oder Rithmic 01 | Produktivsystem nach Antrag |
+| Anthropic API Key | – | Für Free- und Live-Modus · [console.anthropic.com](https://console.anthropic.com) |
+| FRED API Key | – | Optional · kostenlos · Makrodaten (VIX, 10j Yield) |
+| Rithmic Account | – | Nur für `--live` · CME L2 Market Depth Entitlement erforderlich |
 
 ---
 
@@ -44,58 +79,78 @@ pip install -r requirements.txt
 
 ## Setup
 
-### 1. Credentials konfigurieren
+### Umgebungsvariablen (empfohlen)
 
 ```bash
-cp config/credentials.ini.example config/credentials.ini
+cp .env.example .env
+# .env mit Texteditor öffnen und ANTHROPIC_API_KEY eintragen
 ```
 
-Dann `config/credentials.ini` mit einem Texteditor öffnen und ausfüllen:
+`python-dotenv` lädt `.env` automatisch — oder Variablen direkt exportieren:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Rithmic Credentials (nur `--live`)
+
+```bash
+cp nq_trading_assistant/config/credentials.ini.example \
+   nq_trading_assistant/config/credentials.ini
+```
 
 ```ini
 [rithmic]
 user        = IHR_RITHMIC_USERNAME
 password    = IHR_RITHMIC_PASSWORT
 system_name = Rithmic Test          # oder: Rithmic 01
-app_name    = NQTradingAssistant
-app_version = 1.0.0
-url         = wss://rituz00100.rithmic.com:443
+app_name    = nq_trading_assistant
+app_version = 1.0
+url         = rituz00100.rithmic.com:443
 
 [anthropic]
-api_key     = sk-ant-...            # Ihr Anthropic API Key
+api_key     = sk-ant-...            # alternativ: ANTHROPIC_API_KEY Env-Var
 ```
-
-**Rithmic URLs:**
 
 | System | URL |
 |---|---|
-| Rithmic Test | `wss://rituz00100.rithmic.com:443` |
-| Rithmic 01 (Live) | `wss://rithmic01.rithmic.com:443` |
-| Rithmic Paper Trading | `wss://rituz00100.rithmic.com:443` |
+| Rithmic Test / Paper | `rituz00100.rithmic.com:443` |
+| Rithmic 01 (Live) | `rithmic01.rithmic.com:443` |
 
-> `credentials.ini` ist in `.gitignore` eingetragen und wird **nie** committed.
+> `.env` und `credentials.ini` sind in `.gitignore` — werden **nie** committed.
 
 ---
 
 ## Start
 
-### Normaler Start (Live-Modus + UI)
+### Free Mode — yfinance + FRED + Kalender (Standard)
 
 ```bash
 cd nq_trading_assistant
-python main.py
+python main.py           # gleichbedeutend mit: python main.py --free
 ```
 
-Das Dashboard öffnet sich automatisch unter **http://localhost:8501**
+Keine Rithmic-Verbindung nötig. Daten kommen von yfinance (1m/5m/15m Bars),
+FRED (VIX, 10j Yield) und dem Investing.com Wirtschaftskalender.
+Dashboard: **http://localhost:8501**
 
-### Demo-Modus (ohne Rithmic-Verbindung)
+### Demo Mode — synthetische Daten, kein Netzwerk
 
 ```bash
 python main.py --demo
 ```
 
-Generiert synthetische NQ-Daten — nützlich zum Testen der UI und Signal-Pipeline
-ohne echte Marktdaten oder Rithmic-Account.
+Generiert zufällige NQ-Preisbewegungen und ein synthetisches L2 Order Book.
+Ideal zum Testen der UI und Signal-Pipeline ohne Account oder Internet.
+
+### Live Mode — Rithmic L2 Echtzeit
+
+```bash
+python main.py --live
+```
+
+Rithmic-Account mit CME L2 Market Depth Entitlement erforderlich.
+Liefert echte Tick-Daten, L2 Order Book und 1-Minuten-Bars.
 
 ### Nur Engine, kein Streamlit
 
@@ -103,13 +158,15 @@ ohne echte Marktdaten oder Rithmic-Account.
 python main.py --no-ui
 ```
 
-### Optionen
+### Alle Optionen
 
 ```
 python main.py --help
 
+  --free    yfinance Free-Modus (Standard)
+  --demo    Synthetische Daten, kein Netzwerk, kein API Key
+  --live    Rithmic L2 Echtzeit (Credentials erforderlich)
   --no-ui   Streamlit Dashboard nicht starten (headless / Server-Betrieb)
-  --demo    Synthetische Daten statt Rithmic-Verbindung erzwingen
 ```
 
 ---
@@ -172,7 +229,7 @@ Rithmic WebSocket
                                         │ (confidence > 0.65)
                                         ▼
                                   ClaudeAnalyst
-                                  └─ claude-sonnet-4-20250514
+                                  └─ claude-sonnet-4-6
                                      URTEIL: BESTÄTIGT / ABGELEHNT / WARTE
 ```
 
@@ -185,7 +242,7 @@ Rithmic WebSocket
 | Rithmic nicht erreichbar | Auto-Reconnect mit exponential Backoff (2s → 120s), UI zeigt "Offline" |
 | L2 nicht verfügbar (NO_BOOK) | Warnung im Log, Signale nur auf Tick-Basis |
 | Anthropic API Fehler | Letzte Analyse bleibt sichtbar, kein Crash, Fehler in `logs/app.log` |
-| credentials.ini fehlt | Startet automatisch im Demo-Modus |
+| `credentials.ini` fehlt | `--live` fällt auf Free-Modus zurück, `--demo` läuft ohne Credentials |
 | Netzwerkunterbrechung | Rithmic-Client reconnectet automatisch |
 
 Alle Exceptions werden in `logs/app.log` geschrieben.

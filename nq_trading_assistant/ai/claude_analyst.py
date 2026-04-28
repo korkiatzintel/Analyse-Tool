@@ -2,7 +2,7 @@
 AI-powered trade signal analysis via the Anthropic API.
 
 ClaudeAnalyst wraps the Signal Engine output and L2 market data into
-a structured prompt, calls claude-sonnet-4-20250514, and returns a
+a structured prompt, calls claude-sonnet-4-6, and returns a
 parsed verdict dict.
 
 Rate limiting: one API call per 30 seconds maximum.
@@ -26,7 +26,7 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH   = Path(__file__).parent.parent / "config" / "credentials.ini"
-_MODEL         = "claude-sonnet-4-20250514"
+_MODEL         = "claude-sonnet-4-6"
 _MIN_INTERVAL  = 30.0      # seconds between API calls
 _MIN_CONFIDENCE = 0.65
 _MIN_SIGNAL_TYPES = 2
