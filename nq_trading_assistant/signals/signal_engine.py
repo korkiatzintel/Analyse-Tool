@@ -59,6 +59,69 @@ _FALLBACK_ATR        = 8.0    # NQ points — used when ATR unavailable
 _LIQUIDITY_CLUSTER_N = 5      # top N price levels for cluster entry zone
 
 
+class TradeSetup:
+    """NQ/MNQ contract specs + precise entry/SL/TP calculation in ticks and dollars."""
+
+    TICK_SIZE      = 0.25
+    NQ_TICK_VALUE  = 5.00
+    MNQ_TICK_VALUE = 0.50
+
+    def calculate(
+        self,
+        direction: str,
+        entry_price: float,
+        atr: float,
+        vwap: Optional[float] = None,
+        session_high: Optional[float] = None,
+        session_low: Optional[float] = None,
+    ) -> dict:
+        tick = self.TICK_SIZE
+
+        # Snap entry to nearest tick
+        entry = round(round(entry_price / tick) * tick, 2)
+
+        # SL distance: 0.5 × ATR, minimum 8 ticks (2 points)
+        sl_distance = round(round(max(atr * 0.5, 2.0) / tick) * tick, 2)
+
+        if direction == "LONG":
+            stop_loss     = round(entry - sl_distance, 2)
+            take_profit_1 = round(entry + sl_distance * 1.5, 2)
+            take_profit_2 = round(entry + sl_distance * 2.5, 2)
+        else:
+            stop_loss     = round(entry + sl_distance, 2)
+            take_profit_1 = round(entry - sl_distance * 1.5, 2)
+            take_profit_2 = round(entry - sl_distance * 2.5, 2)
+
+        sl_ticks  = round(sl_distance  / tick)
+        tp1_ticks = round(abs(take_profit_1 - entry) / tick)
+        tp2_ticks = round(abs(take_profit_2 - entry) / tick)
+
+        return {
+            "direction":             direction,
+            "entry_price":           entry,
+
+            "stop_loss_price":       stop_loss,
+            "stop_loss_ticks":       sl_ticks,
+            "stop_loss_points":      sl_distance,
+            "stop_loss_usd_nq":      round(sl_ticks  * self.NQ_TICK_VALUE,  2),
+            "stop_loss_usd_mnq":     round(sl_ticks  * self.MNQ_TICK_VALUE, 2),
+
+            "take_profit_1_price":   take_profit_1,
+            "take_profit_1_ticks":   tp1_ticks,
+            "take_profit_1_usd_nq":  round(tp1_ticks * self.NQ_TICK_VALUE,  2),
+            "take_profit_1_usd_mnq": round(tp1_ticks * self.MNQ_TICK_VALUE, 2),
+
+            "take_profit_2_price":   take_profit_2,
+            "take_profit_2_ticks":   tp2_ticks,
+            "take_profit_2_usd_nq":  round(tp2_ticks * self.NQ_TICK_VALUE,  2),
+            "take_profit_2_usd_mnq": round(tp2_ticks * self.MNQ_TICK_VALUE, 2),
+
+            "risk_reward_tp1":       1.5,
+            "risk_reward_tp2":       2.5,
+            "atr_used":              round(atr, 2),
+        }
+
+
 @dataclass
 class TradeRecommendation:
     direction:  str               # "LONG" | "SHORT" | "NEUTRAL"
@@ -69,8 +132,9 @@ class TradeRecommendation:
     target_1:   float
     target_2:   float
     atr:        Optional[float]
-    reasoning:  str
-    raw_score:  float             # weighted sum before normalisation
+    reasoning:   str
+    raw_score:   float            # weighted sum before normalisation
+    trade_setup: Optional[dict]  = None
 
 
 class SignalEngine:
@@ -150,6 +214,15 @@ class SignalEngine:
             direction, entry_ref, atr
         )
 
+        trade_setup = TradeSetup().calculate(
+            direction    = direction,
+            entry_price  = entry_ref,
+            atr          = atr,
+            vwap         = data_snap.get("vwap"),
+            session_high = data_snap.get("session_high"),
+            session_low  = data_snap.get("session_low"),
+        )
+
         reasoning = self._build_reasoning(
             direction, confidence, winning_sigs, entry_zone,
             stop_loss, target_1, target_2, atr, last_price
@@ -166,6 +239,7 @@ class SignalEngine:
             atr         = round(atr, 2) if atr else None,
             reasoning   = reasoning,
             raw_score   = round(abs(net_score), 3),
+            trade_setup = trade_setup,
         )
 
     def to_dict(self, rec: Optional[TradeRecommendation]) -> dict:
@@ -181,6 +255,7 @@ class SignalEngine:
                 "atr":        None,
                 "reasoning":  "No high-confidence signal.",
                 "raw_score":  0.0,
+                "trade_setup": None,
             }
         return {
             "direction":  rec.direction,
@@ -193,6 +268,7 @@ class SignalEngine:
             "atr":        rec.atr,
             "reasoning":  rec.reasoning,
             "raw_score":  rec.raw_score,
+            "trade_setup": rec.trade_setup,
         }
 
     # ------------------------------------------------------------------
@@ -365,6 +441,15 @@ class SignalEngine:
         entry_ref  = (entry_zone["low"] + entry_zone["high"]) / 2
         stop_loss, target_1, target_2 = self._risk_levels(direction, entry_ref, atr)
 
+        trade_setup = TradeSetup().calculate(
+            direction    = direction,
+            entry_price  = entry_ref,
+            atr          = atr,
+            vwap         = free_snap.get("session_vwap"),
+            session_high = free_snap.get("session_high"),
+            session_low  = free_snap.get("session_low"),
+        )
+
         reasoning = self._build_reasoning(
             direction, confidence, winning_sigs, entry_zone,
             stop_loss, target_1, target_2, atr, last_price,
@@ -381,6 +466,7 @@ class SignalEngine:
             atr         = round(atr, 2),
             reasoning   = reasoning,
             raw_score   = round(abs(net_score), 3),
+            trade_setup = trade_setup,
         )
 
     def _swing_entry_zone(

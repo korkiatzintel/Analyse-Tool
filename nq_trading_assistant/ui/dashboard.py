@@ -101,6 +101,7 @@ def _init_ss() -> None:
         "confidence_threshold": 65,
         "w_order_flow":         50,
         "w_technical":          30,
+        "contract_type":        "MNQ (Micro)",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -145,6 +146,14 @@ def _sidebar(state: Optional[dict]) -> None:
 
         # ── Settings ───────────────────────────────────────────────────────
         st.subheader("Einstellungen")
+        st.session_state["contract_type"] = st.radio(
+            "Kontrakt",
+            ["NQ (Standard)", "MNQ (Micro)"],
+            index=["NQ (Standard)", "MNQ (Micro)"].index(
+                st.session_state.get("contract_type", "MNQ (Micro)")
+            ),
+            horizontal=True,
+        )
         st.session_state["confidence_threshold"] = st.slider(
             "Konfidenz-Schwelle", 50, 90,
             st.session_state["confidence_threshold"], 5, format="%d%%",
@@ -415,8 +424,48 @@ def _col_signals(state: dict) -> None:
         st.markdown(pills, unsafe_allow_html=True)
         st.markdown("")
 
-    # ── Entry / SL / Targets ───────────────────────────────────────────────
-    if entry_z or sl or t1:
+    # ── Trade Setup Card (tick / dollar breakdown) ────────────────────────
+    ts      = rec.get("trade_setup")
+    is_mnq  = st.session_state.get("contract_type", "MNQ (Micro)") == "MNQ (Micro)"
+    ct_lbl  = "MNQ" if is_mnq else "NQ"
+
+    if ts:
+        st.markdown("**🎯 Entry**")
+        st.metric("Entry Preis", f"{ts['entry_price']:.2f}",
+                  help="Auf nächsten Tick gerundet (0.25 Pkt)")
+
+        st.markdown("**🛑 Stop Loss**")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Preis",  f"{ts['stop_loss_price']:.2f}")
+        c2.metric("Ticks",  str(ts["stop_loss_ticks"]))
+        c3.metric("Punkte", f"{ts['stop_loss_points']:.2f}")
+        c1b, c2b = st.columns(2)
+        sl_usd = ts["stop_loss_usd_mnq"] if is_mnq else ts["stop_loss_usd_nq"]
+        c1b.metric(f"{ct_lbl} Risiko", f"${sl_usd:.0f}")
+        c2b.metric("R:R Ziel",         f"1:{ts['risk_reward_tp1']}")
+
+        st.markdown(f"**🎯 Take Profit 1  (1:{ts['risk_reward_tp1']})**")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Preis", f"{ts['take_profit_1_price']:.2f}")
+        c2.metric("Ticks", str(ts["take_profit_1_ticks"]))
+        tp1_usd = ts["take_profit_1_usd_mnq"] if is_mnq else ts["take_profit_1_usd_nq"]
+        c3.metric(f"{ct_lbl} Gewinn", f"${tp1_usd:.0f}")
+
+        st.markdown(f"**🚀 Take Profit 2  (1:{ts['risk_reward_tp2']})**")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Preis", f"{ts['take_profit_2_price']:.2f}")
+        c2.metric("Ticks", str(ts["take_profit_2_ticks"]))
+        tp2_usd = ts["take_profit_2_usd_mnq"] if is_mnq else ts["take_profit_2_usd_nq"]
+        c3.metric(f"{ct_lbl} Gewinn", f"${tp2_usd:.0f}")
+
+        st.caption(
+            f"ATR Basis: {ts['atr_used']:.1f} Pkt | "
+            f"Konfidenz: {conf:.0%} | "
+            f"Kontrakt: {ct_lbl} (${ts['stop_loss_usd_nq']:.0f} NQ / "
+            f"${ts['stop_loss_usd_mnq']:.0f} MNQ Risiko)"
+        )
+    elif entry_z or sl or t1:
+        # Fallback for states that pre-date TradeSetup
         entry_low  = entry_z.get("low",  price)
         entry_high = entry_z.get("high", price)
         entry_mid  = (entry_low + entry_high) / 2 if entry_z else price
