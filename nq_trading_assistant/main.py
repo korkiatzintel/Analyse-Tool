@@ -220,6 +220,11 @@ def _write_ui_state() -> None:
             "connected":        _APP.connected,
             "last_update":      datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "next_update_in":   next_update_in,
+            "bars": {
+                "1m":  free.get("bars_1m",  [])[-100:],
+                "5m":  free.get("bars_5m",  [])[-100:],
+                "15m": free.get("bars_15m", [])[-100:],
+            },
             "market": {
                 "last_price":      last_price,
                 "vwap":            vwap,

@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 # ── Page configuration ─────────────────────────────────────────────────────────
@@ -744,6 +746,101 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.markdown("---")
+
+    # ── Chart Timeframe-Auswahl ─────────────────────────────────────────────
+    tf = st.radio("Chart Timeframe", ["1m", "5m", "15m"],
+                  horizontal=True, index=1)
+    bars = state.get("bars", {}).get(tf, [])
+    if bars:
+        df = pd.DataFrame(bars)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=df["timestamp"], open=df["open"], high=df["high"],
+            low=df["low"], close=df["close"], name="NQ",
+            increasing_line_color="#00ff88", decreasing_line_color="#ff4444",
+        ))
+        if len(df) >= 21:
+            df["ema9"]  = df["close"].ewm(span=9).mean()
+            df["ema21"] = df["close"].ewm(span=21).mean()
+            fig.add_trace(go.Scatter(
+                x=df["timestamp"], y=df["ema9"],
+                name="EMA9", line=dict(color="#00aaff", width=1),
+            ))
+            fig.add_trace(go.Scatter(
+                x=df["timestamp"], y=df["ema21"],
+                name="EMA21", line=dict(color="#ff6600", width=1),
+            ))
+        signals = state.get("signals", {})
+        trade_setup = signals.get("trade_setup")
+        if trade_setup and signals.get("direction") != "NEUTRAL":
+            direction = signals.get("direction")
+            color = "#00ff88" if direction == "LONG" else "#ff4444"
+            fig.add_hline(
+                y=trade_setup["entry_price"], line_color=color,
+                line_width=2,
+                annotation_text=f"Entry {trade_setup['entry_price']:.2f}",
+            )
+            fig.add_hline(
+                y=trade_setup["stop_loss_price"], line_color="#ff0000",
+                line_dash="dash",
+                annotation_text=f"SL {trade_setup['stop_loss_price']:.2f}",
+            )
+            fig.add_hline(
+                y=trade_setup["take_profit_1_price"], line_color="#00ff88",
+                line_dash="dash",
+                annotation_text=f"TP1 {trade_setup['take_profit_1_price']:.2f}",
+            )
+            fig.add_hline(
+                y=trade_setup["take_profit_2_price"], line_color="#00ff88",
+                line_dash="dot",
+                annotation_text=f"TP2 {trade_setup['take_profit_2_price']:.2f}",
+            )
+        market = state.get("market", {})
+        if market.get("session_high"):
+            fig.add_hline(
+                y=market["session_high"], line_color="#888888",
+                line_dash="dot", annotation_text="Session High",
+            )
+            fig.add_hline(
+                y=market["session_low"], line_color="#888888",
+                line_dash="dot", annotation_text="Session Low",
+            )
+        fig.update_layout(
+            template="plotly_dark", height=400,
+            margin=dict(l=0, r=0, t=30, b=0),
+            xaxis_rangeslider_visible=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info(f"Warte auf {tf} Bars...")
+
+    # ── Konfidenz-Analyse Panel ─────────────────────────────────────────────
+    with st.expander("🔍 Konfidenz-Analyse", expanded=False):
+        signals_list = state.get("signals", {}).get("signals", [])
+        confidence   = state.get("signals", {}).get("confidence", 0)
+        st.markdown(f"### Gesamtkonfidenz: {confidence:.0%}")
+        st.progress(confidence)
+        if confidence >= 0.80:
+            st.success("✅ SEHR HOCH — Signal wird ausgegeben")
+        elif confidence >= 0.65:
+            st.warning("⚡ HOCH — Signal wird ausgegeben")
+        else:
+            st.error("❌ ZU NIEDRIG — Kein Trade-Signal (Schwelle: 65%)")
+        st.divider()
+        for s in signals_list:
+            s_dir = s.get("direction")
+            icon  = ("🟢" if s_dir in ["BULLISH", "LONG"] else
+                     "🔴" if s_dir in ["BEARISH", "SHORT"] else "⚪")
+            col_a, col_b = st.columns([4, 1])
+            with col_a:
+                st.markdown(f"{icon} **{s.get('type', '?')}** — {s.get('description', '')}")
+            with col_b:
+                st.metric("", f"{s.get('confidence', 0):.0%}")
+            st.progress(s.get("confidence", 0))
+        st.caption(
+            f"Berechnet: {state.get('last_update', '—')} | Nächstes Update: ~60s"
+        )
 
     # ── Three columns ───────────────────────────────────────────────────────
     left, mid, right = st.columns([3, 4, 3])
