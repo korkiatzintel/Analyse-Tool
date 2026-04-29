@@ -108,6 +108,11 @@ class ClaudeAnalyst:
         self._memory: deque = deque(maxlen=_MEMORY_SIZE)
         self._lock = asyncio.Lock()
 
+        # Cost & cache tracking (reset on process restart, exposed via get_cost_stats)
+        self.total_calls:        int   = 0
+        self.cached_calls:       int   = 0
+        self.estimated_cost_usd: float = 0.0
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -211,33 +216,72 @@ class ClaudeAnalyst:
         )
         ts_str = _utc_now()
 
-        logger.info("[%s] Calling Claude (%s)…", ts_str, _MODEL)
+        logger.info("[%s] Calling Claude (%s) with prompt caching…", ts_str, _MODEL)
 
         message = await self._client.messages.create(
             model=_MODEL,
             max_tokens=_MAX_TOKENS,
-            system=_SYSTEM_PROMPT,
+            system=[
+                {
+                    "type": "text",
+                    "text": _SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": prompt}],
+            betas=["prompt-caching-2024-07-31"],
+        )
+
+        # Token counts — cache fields may be absent on older SDK versions
+        input_tokens   = message.usage.input_tokens
+        output_tokens  = message.usage.output_tokens
+        cache_read     = getattr(message.usage, "cache_read_input_tokens",    0) or 0
+        cache_creation = getattr(message.usage, "cache_creation_input_tokens", 0) or 0
+
+        # Update running stats
+        self.total_calls += 1
+        if cache_read > 0:
+            self.cached_calls += 1
+
+        # Pricing: Input $3/MTok · Cache Read $0.30/MTok · Output $15/MTok
+        call_cost = (
+            (input_tokens   * 3.00) / 1_000_000
+            + (cache_read   * 0.30) / 1_000_000
+            + (output_tokens * 15.0) / 1_000_000
+        )
+        self.estimated_cost_usd += call_cost
+
+        logger.info(
+            "Cache — read: %d tok, created: %d tok | "
+            "input: %d, output: %d | call cost: $%.5f | "
+            "hits: %d/%d (%.0f%%)",
+            cache_read, cache_creation,
+            input_tokens, output_tokens,
+            call_cost,
+            self.cached_calls, self.total_calls,
+            (self.cached_calls / self.total_calls * 100) if self.total_calls else 0,
         )
 
         raw_text = message.content[0].text if message.content else ""
         parsed   = _parse_response(raw_text)
 
         return {
-            "timestamp":      ts_str,
-            "verdict":        parsed["verdict"],
-            "begruendung":    parsed["begruendung"],
-            "beachtung":      parsed["beachtung"],
-            "raw_response":   raw_text,
-            "direction":      rec.get("direction"),
-            "confidence":     rec.get("confidence"),
-            "entry_zone":     rec.get("entry_zone"),
-            "stop_loss":      rec.get("stop_loss"),
-            "target_1":       rec.get("target_1"),
-            "target_2":       rec.get("target_2"),
-            "input_tokens":   message.usage.input_tokens,
-            "output_tokens":  message.usage.output_tokens,
-            "skipped":        False,
+            "timestamp":             ts_str,
+            "verdict":               parsed["verdict"],
+            "begruendung":           parsed["begruendung"],
+            "beachtung":             parsed["beachtung"],
+            "raw_response":          raw_text,
+            "direction":             rec.get("direction"),
+            "confidence":            rec.get("confidence"),
+            "entry_zone":            rec.get("entry_zone"),
+            "stop_loss":             rec.get("stop_loss"),
+            "target_1":              rec.get("target_1"),
+            "target_2":              rec.get("target_2"),
+            "input_tokens":          input_tokens,
+            "output_tokens":         output_tokens,
+            "cache_read_tokens":     cache_read,
+            "cache_creation_tokens": cache_creation,
+            "skipped":               False,
         }
 
     # ------------------------------------------------------------------
@@ -247,6 +291,23 @@ class ClaudeAnalyst:
     def seconds_until_next_call(self) -> float:
         elapsed = time.monotonic() - self._last_call_ts
         return max(0.0, _MIN_INTERVAL - elapsed)
+
+    # ------------------------------------------------------------------
+    # Cost & cache statistics (read by dashboard sidebar)
+    # ------------------------------------------------------------------
+
+    def get_cost_stats(self) -> dict:
+        """Return cache efficiency and accumulated cost since process start."""
+        hit_rate = (
+            self.cached_calls / self.total_calls
+            if self.total_calls else 0.0
+        )
+        return {
+            "total_calls":        self.total_calls,
+            "cached_calls":       self.cached_calls,
+            "cache_hit_rate":     round(hit_rate, 3),
+            "estimated_cost_usd": round(self.estimated_cost_usd, 5),
+        }
 
 
 # ------------------------------------------------------------------

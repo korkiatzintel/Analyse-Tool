@@ -233,6 +233,7 @@ def _write_ui_state() -> None:
             "signals":                   _APP.last_rec,
             "claude":                    _APP.last_claude,
             "claude_memory":             _APP.claude.get_memory()[:5],
+            "claude_cost_stats":         _APP.claude.get_cost_stats(),
             "vix":                       free.get("vix", 0.0),
             "vix_regime":                free.get("vix_regime", "unknown"),
             "yield_10y":                 free.get("yield_10y", 0.0),

@@ -160,6 +160,27 @@ def _sidebar(state: Optional[dict]) -> None:
 
         st.divider()
 
+        # ── Claude cost & cache stats ──────────────────────────────────────
+        if state is not None:
+            cs = state.get("claude_cost_stats", {})
+            if cs.get("total_calls", 0) > 0:
+                st.subheader("Claude API")
+                hit_pct = cs.get("cache_hit_rate", 0.0) * 100
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric("Calls",  cs.get("total_calls", 0))
+                    st.metric("Cache ✓", cs.get("cached_calls", 0))
+                with c2:
+                    st.metric("Hit-Rate", f"{hit_pct:.0f}%")
+                    st.metric("Kosten",   f"${cs.get('estimated_cost_usd', 0):.4f}")
+                if hit_pct >= 50:
+                    st.caption("🟢 Cache aktiv — ~90 % Ersparnis auf gecachte Tokens")
+                elif cs.get("total_calls", 0) == 1:
+                    st.caption("⏳ Erster Call — Cache wird beim nächsten Aufruf greifen")
+                else:
+                    st.caption("🟡 Cache-Rate niedrig")
+                st.divider()
+
         # ── Manual trade log ───────────────────────────────────────────────
         st.subheader("Trade-Log")
         with st.form("trade_entry", clear_on_submit=True):
@@ -537,24 +558,40 @@ def _col_ai(state: dict) -> None:
 
     st.divider()
 
-    # ── Force-analyse button + cost tracker ────────────────────────────────
+    # ── Force-analyse button ───────────────────────────────────────────────
+    if st.button(
+        "🔍 Jetzt analysieren", use_container_width=True,
+        help="Sendet Force-Analyse-Request an main.py",
+    ):
+        _write_command({
+            "force_analyze": True,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        st.toast("Analyse angefordert!", icon="🔍")
+
+    # ── Cost & cache stats (from backend) ─────────────────────────────────
+    cs = state.get("claude_cost_stats", {})
+    total   = cs.get("total_calls", 0)
+    cached  = cs.get("cached_calls", 0)
+    hit_pct = cs.get("cache_hit_rate", 0.0) * 100
+    cost    = cs.get("estimated_cost_usd", 0.0)
+
     c1, c2 = st.columns(2)
     with c1:
-        if st.button(
-            "🔍 Jetzt analysieren", use_container_width=True,
-            help="Sendet Force-Analyse-Request an main.py",
-        ):
-            _write_command({
-                "force_analyze": True,
-                "ts": datetime.now(timezone.utc).isoformat(),
-            })
-            st.toast("Analyse angefordert!", icon="🔍")
-
+        st.metric("API Calls", total,
+                  help="Calls seit Prozessstart")
+        st.metric("Cache Hits", f"{cached}",
+                  delta=f"{hit_pct:.0f}% Hit-Rate" if total else None,
+                  delta_color="normal")
     with c2:
-        calls = st.session_state.get("api_calls_today", 0)
-        cost  = calls * 0.003
-        st.metric("API Calls heute", calls, help="~$0.003 pro Analyse (claude-sonnet)")
-        st.caption(f"≈ ${cost:.3f} heute")
+        st.metric("Kosten (gesamt)", f"${cost:.4f}",
+                  help="Input $3/MTok · Cache $0.30/MTok · Output $15/MTok")
+        if total == 1:
+            st.caption("⏳ 1. Call — Cache greift ab dem 2.")
+        elif hit_pct >= 50:
+            st.caption("🟢 Cache aktiv")
+        elif total > 1:
+            st.caption("🟡 Cache-Rate niedrig")
 
     st.divider()
 
