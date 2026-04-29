@@ -6,7 +6,8 @@ pandas>=2.0.0
 numpy>=1.24.0
 
 # Technical analysis (pandas-ta preferred; native fallbacks used if absent)
-pandas-ta>=0.3.14b
+# pandas-ta is optional — app works without it via native pandas/numpy fallbacks
+# pandas-ta>=0.3.14b  # uncomment if your Python env supports it
 
 # Free market data
 yfinance>=0.2.40
