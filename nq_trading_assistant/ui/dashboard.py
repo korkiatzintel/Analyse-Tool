@@ -368,165 +368,82 @@ def _order_book_html(asks: list, bids: list) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _col_signals(state: dict) -> None:
-    st.subheader("Signale")
+    threshold  = st.session_state.get("confidence_threshold", 65) / 100.0
+    scan       = state.get("scan", {})
+    candidates = scan.get("candidates", [])
 
-    rec       = state.get("signals", {})
-    direction = rec.get("direction", "NEUTRAL")
-    conf      = rec.get("confidence", 0.0)
-    signals   = rec.get("signals", [])
-    entry_z   = rec.get("entry_zone") or {}
-    sl        = rec.get("stop_loss")
-    t1        = rec.get("target_1")
-    t2        = rec.get("target_2")
-    price     = state.get("market", {}).get("last_price") or 0.0
-    threshold = st.session_state.get("confidence_threshold", 65) / 100.0
+    st.subheader("📊 Trade Scanner — Top 3 Setups")
 
-    # ── Direction box ──────────────────────────────────────────────────────
-    if direction == "LONG":
-        css, emoji, col = "sig-long",    "🟢", "#2ea043"
-    elif direction == "SHORT":
-        css, emoji, col = "sig-short",   "🔴", "#f85149"
-    else:
-        css, emoji, col = "sig-neutral", "⚪", "#888"
+    if not candidates:
+        st.info("Scanner wertet aus...")
+        return
 
-    warn_html = ""
-    if conf > 0 and conf < threshold:
-        warn_html = (
-            f'<div style="color:#e3b341;font-size:.72rem;margin-top:4px">'
-            f'unter Schwelle ({threshold:.0%})</div>'
-        )
+    for c in candidates:
+        conf      = c.get("confidence", 0)
+        direction = c.get("direction", "?")
+        is_signal = conf >= threshold
+        rank      = c.get("rank", "?")
+        label     = c.get("label", direction)
 
-    st.markdown(
-        f'<div class="{css}">'
-        f'<div style="font-size:1.1rem;font-weight:700;color:{col}">{emoji} {direction}</div>'
-        f'<div style="font-size:2.2rem;font-weight:800;color:{col}">{conf:.0%}</div>'
-        f'<div style="font-size:.72rem;color:#888">Konfidenz</div>'
-        f'{warn_html}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("")
+        with st.container():
+            col_rank, col_dir, col_conf = st.columns([1, 3, 2])
+            with col_rank:
+                st.markdown(f"### #{rank}")
+            with col_dir:
+                arrow = "▲" if direction == "LONG" else "▼"
+                if is_signal:
+                    if direction == "LONG":
+                        st.success(f"{arrow} {direction} 🔔 SIGNAL")
+                    else:
+                        st.error(f"{arrow} {direction} 🔔 SIGNAL")
+                else:
+                    st.info(f"{arrow} {direction} — Kandidat")
+            with col_conf:
+                st.metric("Konfidenz", f"{conf:.0%}")
 
-    # ── Signal pills ───────────────────────────────────────────────────────
-    if signals:
-        pills = ""
-        for s in signals:
-            d = s.get("direction", "")
-            if d in ("BULLISH", "LONG"):
-                cls = "pill-bull"
-            elif d in ("BEARISH", "SHORT"):
-                cls = "pill-bear"
-            else:
-                cls = "pill-grey"
-            pills += (
-                f'<span class="{cls}">'
-                f'{s.get("type","?")} {s.get("confidence",0):.0%}'
-                f'</span>'
-            )
-        st.markdown(pills, unsafe_allow_html=True)
-        st.markdown("")
+            st.progress(conf)
 
-    # ── Trade Setup Card (tick / dollar breakdown) ────────────────────────
-    ts      = rec.get("trade_setup")
-    is_mnq  = st.session_state.get("contract_type", "MNQ (Micro)") == "MNQ (Micro)"
-    ct_lbl  = "MNQ" if is_mnq else "NQ"
+            sigs = c.get("signals", [])
+            for s in sigs:
+                icon = ("🟢" if s.get("direction") in ["BULLISH", "LONG"]
+                        else "🔴")
+                st.caption(f"{icon} {s.get('type', '?')}: {s.get('description', '')}")
 
-    if ts:
-        st.markdown("**🎯 Entry**")
-        st.metric("Entry Preis", f"{ts['entry_price']:.2f}",
-                  help="Auf nächsten Tick gerundet (0.25 Pkt)")
+            ts = c.get("trade_setup")
+            if ts and is_signal:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Entry", f"{ts.get('entry_price', 0):.2f}")
+                c2.metric(
+                    "SL",
+                    f"{ts.get('stop_loss_price', 0):.2f} "
+                    f"({ts.get('stop_loss_ticks', 0)} Ticks)",
+                )
+                c3.metric(
+                    "TP1",
+                    f"{ts.get('take_profit_1_price', 0):.2f} "
+                    f"({ts.get('take_profit_1_ticks', 0)} Ticks)",
+                )
 
-        st.markdown("**🛑 Stop Loss**")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Preis",  f"{ts['stop_loss_price']:.2f}")
-        c2.metric("Ticks",  str(ts["stop_loss_ticks"]))
-        c3.metric("Punkte", f"{ts['stop_loss_points']:.2f}")
-        c1b, c2b = st.columns(2)
-        sl_usd = ts["stop_loss_usd_mnq"] if is_mnq else ts["stop_loss_usd_nq"]
-        c1b.metric(f"{ct_lbl} Risiko", f"${sl_usd:.0f}")
-        c2b.metric("R:R Ziel",         f"1:{ts['risk_reward_tp1']}")
+            st.divider()
 
-        st.markdown(f"**🎯 Take Profit 1  (1:{ts['risk_reward_tp1']})**")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Preis", f"{ts['take_profit_1_price']:.2f}")
-        c2.metric("Ticks", str(ts["take_profit_1_ticks"]))
-        tp1_usd = ts["take_profit_1_usd_mnq"] if is_mnq else ts["take_profit_1_usd_nq"]
-        c3.metric(f"{ct_lbl} Gewinn", f"${tp1_usd:.0f}")
-
-        st.markdown(f"**🚀 Take Profit 2  (1:{ts['risk_reward_tp2']})**")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Preis", f"{ts['take_profit_2_price']:.2f}")
-        c2.metric("Ticks", str(ts["take_profit_2_ticks"]))
-        tp2_usd = ts["take_profit_2_usd_mnq"] if is_mnq else ts["take_profit_2_usd_nq"]
-        c3.metric(f"{ct_lbl} Gewinn", f"${tp2_usd:.0f}")
-
-        st.caption(
-            f"ATR Basis: {ts['atr_used']:.1f} Pkt | "
-            f"Konfidenz: {conf:.0%} | "
-            f"Kontrakt: {ct_lbl} (${ts['stop_loss_usd_nq']:.0f} NQ / "
-            f"${ts['stop_loss_usd_mnq']:.0f} MNQ Risiko)"
-        )
-    elif entry_z or sl or t1:
-        # Fallback for states that pre-date TradeSetup
-        entry_low  = entry_z.get("low",  price)
-        entry_high = entry_z.get("high", price)
-        entry_mid  = (entry_low + entry_high) / 2 if entry_z else price
-        rr_dir     = "normal" if direction == "LONG" else "inverse"
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric(
-                "Entry-Zone",
-                f"{entry_low:.2f}–{entry_high:.2f}" if entry_z else "–",
-                delta=f"{entry_mid - price:+.1f} Pkt" if price else None,
-                delta_color="off",
-            )
-            st.metric(
-                "Target 1",
-                f"{t1:.2f}" if t1 else "–",
-                delta=f"{t1 - price:+.1f} Pkt" if (t1 and price) else None,
-                delta_color=rr_dir,
-            )
-        with c2:
-            st.metric(
-                "Stop-Loss",
-                f"{sl:.2f}" if sl else "–",
-                delta=f"{sl - price:+.1f} Pkt" if (sl and price) else None,
-                delta_color="inverse",
-            )
-            st.metric(
-                "Target 2",
-                f"{t2:.2f}" if t2 else "–",
-                delta=f"{t2 - price:+.1f} Pkt" if (t2 and price) else None,
-                delta_color=rr_dir,
-            )
-    else:
-        st.caption("Kein aktives Signal — kein Entry/SL/TP")
-
-    st.divider()
-
-    # ── CALENDAR_FILTER warning banner ─────────────────────────────────────
+    # ── Calendar warning + events (kept from previous column) ─────────────
     if state.get("event_window_active"):
         hi    = [e for e in state.get("upcoming_events", []) if e.get("impact") == "high"]
         names = ", ".join(e.get("name", "?") for e in hi[:2])
         mins  = state.get("minutes_to_next_event")
-        if mins and float(mins) > 0:
-            msg = f"⚠️ High-Impact Event in {float(mins):.0f} Min — Signale pausiert"
-        else:
-            msg = "⚠️ Post-Event Wartezeit aktiv — Signale pausiert"
+        msg   = (f"⚠️ High-Impact Event in {float(mins):.0f} Min — Signale pausiert"
+                 if (mins and float(mins) > 0) else
+                 "⚠️ Post-Event Wartezeit aktiv — Signale pausiert")
         if names:
             msg += f": {names}"
         st.markdown(f'<div class="event-warn">{msg}</div>', unsafe_allow_html=True)
         st.markdown("")
 
-    # ── Calendar events table ──────────────────────────────────────────────
-    st.markdown("**Kalender-Events (USD)**")
     events = [
         e for e in state.get("upcoming_events", [])
         if e.get("impact") in ("high", "medium")
     ]
     if events:
-        import pandas as pd
         rows = []
         for ev in sorted(events, key=lambda x: x.get("minutes_away") or 9999):
             impact = ev.get("impact", "low")
@@ -543,16 +460,6 @@ def _col_signals(state: dict) -> None:
             pd.DataFrame(rows), hide_index=True, use_container_width=True,
             height=min(210, 42 + 35 * len(rows)),
         )
-    else:
-        st.caption("Keine relevanten Events heute")
-
-    # ── Signal detail expander ─────────────────────────────────────────────
-    if signals:
-        with st.expander("Signal-Details"):
-            for s in signals:
-                st.markdown(f"**{s.get('type','?')}** `{s.get('confidence',0):.0%}`")
-                if s.get("description"):
-                    st.caption(s["description"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

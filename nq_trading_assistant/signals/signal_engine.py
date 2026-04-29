@@ -162,6 +162,8 @@ class SignalEngine:
         self._of_analyzer   = OrderFlowAnalyzer()
         self._ta_analyzer   = TechnicalAnalyzer()
         self._free_analyzer = FreeMarketAnalyzer()
+        self.trade_setup    = TradeSetup()
+        self.threshold      = _MIN_CONFIDENCE
 
     def evaluate(
         self,
@@ -519,6 +521,165 @@ class SignalEngine:
                 bear_sigs.append(sig)
 
         return bull_score, bear_score, bull_sigs, bear_sigs
+
+    # ==================================================================
+    # Trade Scanner — always returns 3 candidates
+    # ==================================================================
+
+    def scan_trades(self, ctx: dict) -> dict:
+        """
+        Evaluates all strategies and always returns 3 candidates sorted by
+        confidence (highest first).  A candidate is marked as "signal" when
+        confidence >= self.threshold.
+        """
+        price  = ctx.get("last_price", 0) or 0
+        atr    = compute_atr(ctx.get("bars_5m", [])) or _FALLBACK_ATR
+        vwap   = ctx.get("session_vwap") or None
+        s_high = ctx.get("session_high") or None
+        s_low  = ctx.get("session_low")  or None
+
+        candidates = []
+
+        # Candidate 1: LONG
+        long_signals    = self._evaluate_direction(ctx, "LONG")
+        long_confidence = self._calculate_confidence(long_signals)
+        long_setup = self.trade_setup.calculate(
+            "LONG", price, atr, vwap, s_high, s_low,
+        ) if long_confidence > 0.3 and price > 0 else None
+
+        candidates.append({
+            "rank":       None,
+            "direction":  "LONG",
+            "confidence": long_confidence,
+            "signals":    long_signals,
+            "trade_setup": long_setup,
+            "is_signal":  long_confidence >= self.threshold,
+            "reasoning":  self._build_scan_reasoning("LONG", long_signals, long_confidence),
+        })
+
+        # Candidate 2: SHORT
+        short_signals    = self._evaluate_direction(ctx, "SHORT")
+        short_confidence = self._calculate_confidence(short_signals)
+        short_setup = self.trade_setup.calculate(
+            "SHORT", price, atr, vwap, s_high, s_low,
+        ) if short_confidence > 0.3 and price > 0 else None
+
+        candidates.append({
+            "rank":       None,
+            "direction":  "SHORT",
+            "confidence": short_confidence,
+            "signals":    short_signals,
+            "trade_setup": short_setup,
+            "is_signal":  short_confidence >= self.threshold,
+            "reasoning":  self._build_scan_reasoning("SHORT", short_signals, short_confidence),
+        })
+
+        # Candidate 3: Special setups (Mean Reversion, Gap Fill)
+        special_ctx = {
+            "price":      price,
+            "atr":        atr,
+            "vwap":       vwap or 0,
+            "session_high": s_high or 0,
+            "session_low":  s_low  or 0,
+            "bars_5m":    ctx.get("bars_5m", []),
+            "prev_close": ctx.get("yesterday_close", 0) or 0,
+        }
+        neutral_signals    = self._evaluate_special_setups(special_ctx)
+        neutral_confidence = self._calculate_confidence(neutral_signals)
+        neutral_direction  = "LONG"
+        if neutral_signals:
+            first_dir = neutral_signals[0].get("direction", "")
+            neutral_direction = "LONG" if first_dir in ["BULLISH", "LONG"] else "SHORT"
+
+        candidates.append({
+            "rank":       None,
+            "direction":  neutral_direction,
+            "confidence": neutral_confidence,
+            "signals":    neutral_signals,
+            "trade_setup": None,
+            "is_signal":  neutral_confidence >= self.threshold,
+            "label":      "Mean Reversion / Special Setup",
+            "reasoning":  self._build_scan_reasoning(
+                neutral_direction, neutral_signals, neutral_confidence
+            ),
+        })
+
+        candidates.sort(key=lambda x: x["confidence"], reverse=True)
+        for i, c in enumerate(candidates):
+            c["rank"] = i + 1
+
+        best = candidates[0]
+        return {
+            "candidates": candidates,
+            "best_signal": best,
+            "any_signal": any(c["is_signal"] for c in candidates),
+            "threshold": self.threshold,
+        }
+
+    def _get_all_signals(self, ctx: dict) -> List[dict]:
+        """Return all non-blocking signals as dicts, VIX dampening applied."""
+        free_signals = self._free_analyzer.analyze(ctx)
+        if ctx.get("vix", 0.0) > _VIX_HIGH:
+            free_signals = _dampen_confidence(free_signals, factor=0.80)
+        ta_signals = self._ta_analyzer.analyze(_free_snap_to_data_snap(ctx))
+        return [
+            _signal_to_dict(s)
+            for s in (free_signals + ta_signals)
+            if not s.metadata.get("block")
+        ]
+
+    def _evaluate_direction(self, ctx: dict, direction: str) -> List[dict]:
+        """Return all signals that agree with the given direction."""
+        target_dirs = ["BULLISH", "LONG"] if direction == "LONG" else ["BEARISH", "SHORT"]
+        return [s for s in self._get_all_signals(ctx) if s.get("direction") in target_dirs]
+
+    def _evaluate_special_setups(self, ctx: dict) -> List[dict]:
+        """Detect Mean Reversion and Gap Fill setups."""
+        signals = []
+        price = ctx.get("price", 0)
+        vwap  = ctx.get("vwap", 0)
+
+        if vwap > 0 and price > 0:
+            distance = abs(price - vwap)
+            if distance > ctx.get("atr", _FALLBACK_ATR) * 0.8:
+                direction = "BULLISH" if price < vwap else "BEARISH"
+                signals.append({
+                    "type":        "MEAN_REVERSION",
+                    "direction":   direction,
+                    "confidence":  min(0.75, distance / (ctx.get("atr", _FALLBACK_ATR) * 2)),
+                    "description": (
+                        f"Preis {distance:.1f} Punkte von VWAP entfernt "
+                        f"— Rückkehr wahrscheinlich"
+                    ),
+                })
+
+        bars = ctx.get("bars_5m", [])
+        prev_close = ctx.get("prev_close", 0)
+        if len(bars) > 3 and prev_close > 0:
+            gap = bars[0].get("open", 0) - prev_close
+            if abs(gap) > 10:
+                direction = "BEARISH" if gap > 0 else "BULLISH"
+                signals.append({
+                    "type":        "GAP_FILL",
+                    "direction":   direction,
+                    "confidence":  0.65,
+                    "description": f"Gap von {gap:.1f} Punkten noch nicht gefüllt",
+                })
+
+        return signals
+
+    @staticmethod
+    def _calculate_confidence(signals: List[dict]) -> float:
+        if not signals:
+            return 0.0
+        return min(0.95, sum(s.get("confidence", 0) for s in signals) / max(len(signals), 1))
+
+    @staticmethod
+    def _build_scan_reasoning(direction: str, signals: List[dict], confidence: float) -> str:
+        if not signals:
+            return f"Keine {direction} Signale aktiv"
+        parts = [f"{s['type']} ({s.get('confidence', 0):.0%})" for s in signals]
+        return f"{direction} {confidence:.0%} | " + " · ".join(parts)
 
 
 # ------------------------------------------------------------------

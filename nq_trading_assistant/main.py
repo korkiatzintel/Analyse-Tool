@@ -89,6 +89,7 @@ class AppComponents:
 
         # Most recent outputs — shared with the UI process via _STATE_FILE.
         self.last_rec:    dict = {}
+        self.last_scan:   dict = {}
         self.last_claude: dict = {}
         self.connected:   bool = False
         self.contract:    str  = "–"
@@ -235,6 +236,7 @@ def _write_ui_state() -> None:
                 "bid_ladder":      book_snap.get("bid_ladder", [])[:5],
                 "ask_ladder":      book_snap.get("ask_ladder", [])[:5],
             },
+            "scan":                      _APP.last_scan,
             "signals":                   _APP.last_rec,
             "claude":                    _APP.last_claude,
             "claude_memory":             _APP.claude.get_memory()[:5],
@@ -322,10 +324,25 @@ async def _stream_free() -> None:
         _APP.last_free_snap    = ctx
         _APP.last_free_poll_ts = time.monotonic()
         try:
-            rec = _APP.signal_engine.evaluate_multi_tf(ctx)
-            _APP.last_rec = _APP.signal_engine.to_dict(rec)
+            scan = _APP.signal_engine.scan_trades(ctx)
+            _APP.last_scan = scan
+            best = scan["best_signal"]
+            ts   = best.get("trade_setup") or {}
+            _APP.last_rec = {
+                "direction":   best.get("direction", "NEUTRAL"),
+                "confidence":  best.get("confidence", 0.0),
+                "signals":     best.get("signals", []),
+                "reasoning":   best.get("reasoning", ""),
+                "trade_setup": best.get("trade_setup"),
+                "entry_zone":  {},
+                "stop_loss":   ts.get("stop_loss_price"),
+                "target_1":    ts.get("take_profit_1_price"),
+                "target_2":    ts.get("take_profit_2_price"),
+                "atr":         ts.get("atr_used"),
+                "raw_score":   0.0,
+            }
 
-            if rec is not None:
+            if scan["any_signal"]:
                 result = await _APP.claude.analyze({
                     "recommendation": _APP.last_rec,
                     "free_snapshot":  ctx,
