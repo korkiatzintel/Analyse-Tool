@@ -17,6 +17,7 @@ the Streamlit subprocess is terminated, and the asyncio loop exits.
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -90,6 +91,61 @@ class AppComponents:
 
 
 _APP = AppComponents()
+
+_UI_STATE_FILE = Path(__file__).parent / "ui_state.json"
+
+
+def _write_ui_state(ctx: dict) -> None:
+    """Serialise current app state to ui_state.json for the Streamlit dashboard."""
+    rec    = _APP.last_rec
+    claude = _APP.last_claude
+
+    trade_setup = None
+    ez = rec.get("entry_zone", {})
+    if rec.get("direction") not in (None, "NEUTRAL") and ez:
+        entry_price = round((ez.get("low", 0) + ez.get("high", 0)) / 2, 2)
+        trade_setup = {
+            "entry_price":         entry_price,
+            "stop_loss_price":     rec.get("stop_loss"),
+            "take_profit_1_price": rec.get("target_1"),
+            "take_profit_2_price": rec.get("target_2"),
+        }
+
+    state = {
+        "last_update": ctx.get("timestamp", ""),
+        "connected":   _APP.connected,
+        "contract":    _APP.contract,
+        "bars": {
+            "1m":  ctx.get("bars_1m",  [])[-100:],
+            "5m":  ctx.get("bars_5m",  [])[-100:],
+            "15m": ctx.get("bars_15m", [])[-100:],
+        },
+        "signals": {
+            "direction":   rec.get("direction", "NEUTRAL"),
+            "confidence":  rec.get("confidence", 0.0),
+            "signals":     rec.get("signals", []),
+            "trade_setup": trade_setup,
+        },
+        "market": {
+            "last_price":   ctx.get("last_price", 0.0),
+            "session_high": ctx.get("session_high"),
+            "session_low":  ctx.get("session_low"),
+            "vwap":         ctx.get("session_vwap"),
+            "vix":          ctx.get("vix", 0.0),
+        },
+        "claude": {
+            "verdict":     claude.get("verdict", "–"),
+            "begruendung": claude.get("begruendung", ""),
+            "beachtung":   claude.get("beachtung", ""),
+        },
+    }
+
+    try:
+        with open(_UI_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, default=str)
+    except Exception:
+        logger.exception("Failed to write ui_state.json")
+
 
 # ---------------------------------------------------------------------------
 # Callback pipeline
@@ -227,6 +283,8 @@ async def _stream_free() -> None:
                 if not result.get("skipped"):
                     _APP.last_claude = result
                     _log_verdict(result)
+
+            _write_ui_state(free_snap)
         except Exception:
             logger.exception("Free-data signal/AI pipeline error — continuing.")
 
