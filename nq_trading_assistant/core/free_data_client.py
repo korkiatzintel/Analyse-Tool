@@ -99,6 +99,9 @@ class FreeDataClient:
         self._bars: Dict[str, List[dict]] = {"1m": [], "5m": [], "15m": []}
         self._last_bar_ts: Dict[str, int] = {"1m": 0, "5m": 0, "15m": 0}
 
+        # Realtime price override (updated every 10s by _realtime_price_loop)
+        self._last_price: float = 0.0
+
         # Session accumulators
         self._session_date:        Optional[date] = None
         self._session_vwap_sum_pv: float = 0.0
@@ -132,6 +135,9 @@ class FreeDataClient:
         self._running = True
         logger.info("FreeDataClient: starting polling loop (interval=%ds)", _POLL_INTERVAL)
 
+        # Spawn realtime price updater (every 10 s, parallel to main loop)
+        asyncio.create_task(self._realtime_price_loop())
+
         # Warm-up: initial fetch with history
         await self._initial_fetch()
 
@@ -151,12 +157,59 @@ class FreeDataClient:
         self._running = False
 
     # ------------------------------------------------------------------
+    # Realtime price feed (Barchart, ~5 s delay, every 10 s)
+    # ------------------------------------------------------------------
+
+    async def _realtime_price_loop(self) -> None:
+        """Update self._last_price every 10 s from Barchart public quotes."""
+        while self._running:
+            price = await asyncio.get_event_loop().run_in_executor(
+                None, self._fetch_realtime_price
+            )
+            if price > 0:
+                yf_price = self._bars["1m"][-1]["close"] if self._bars["1m"] else 0.0
+                if yf_price > 0 and abs(price - yf_price) > 5:
+                    logger.info(
+                        "Realtime price %s differs from yfinance %s by %.1f pts",
+                        price, yf_price, abs(price - yf_price),
+                    )
+                self._last_price = price
+            await asyncio.sleep(10)
+
+    def _fetch_realtime_price(self) -> float:
+        """
+        Fetch current NQ price from Barchart public page (~5 s delay).
+        Returns 0.0 on any failure so the caller can fall back gracefully.
+        """
+        import re
+        import requests as req
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36"
+                )
+            }
+            r = req.get(
+                "https://www.barchart.com/futures/quotes/NQ*0/futures-prices",
+                headers=headers,
+                timeout=5,
+            )
+            match = re.search(r'"lastPrice"\s*:\s*"?([\d,]+\.?\d*)"?', r.text)
+            if match:
+                return float(match.group(1).replace(",", ""))
+        except Exception as exc:
+            logger.debug("Realtime price fetch failed: %s", exc)
+        return 0.0
+
+    # ------------------------------------------------------------------
     # Public: snapshot for signal engine
     # ------------------------------------------------------------------
 
     def get_snapshot(self) -> dict:
         """Return all current market data as a single dict."""
-        last_price = self._bars["1m"][-1]["close"] if self._bars["1m"] else 0.0
+        yf_price   = self._bars["1m"][-1]["close"] if self._bars["1m"] else 0.0
+        last_price = self._last_price if self._last_price > 0 else yf_price
         yesterday_close = self._yesterday_close or last_price
 
         # Overnight gap

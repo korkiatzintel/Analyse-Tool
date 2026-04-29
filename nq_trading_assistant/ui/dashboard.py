@@ -657,7 +657,18 @@ def main() -> None:
     # ── Chart Timeframe-Auswahl ─────────────────────────────────────────────
     tf = st.radio("Chart Timeframe", ["1m", "5m", "15m"],
                   horizontal=True, index=1)
-    bars = state.get("bars", {}).get(tf, [])
+    lookback = st.select_slider(
+        "Zeitraum",
+        options=["2h", "4h", "8h", "12h", "24h", "48h"],
+        value="8h",
+    )
+    lookback_map = {
+        "1m":  {"2h": 120, "4h": 240, "8h": 480, "12h": 720, "24h": 1440, "48h": 2880},
+        "5m":  {"2h": 24,  "4h": 48,  "8h": 96,  "12h": 144, "24h": 288,  "48h": 576},
+        "15m": {"2h": 8,   "4h": 16,  "8h": 32,  "12h": 48,  "24h": 96,   "48h": 192},
+    }
+    n_bars = lookback_map.get(tf, {}).get(lookback, 96)
+    bars = state.get("bars", {}).get(tf, [])[-n_bars:]
     if bars:
         df = pd.DataFrame(bars)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -713,11 +724,14 @@ def main() -> None:
                 y=market["session_low"], line_color="#888888",
                 line_dash="dot", annotation_text="Session Low",
             )
+        first_ts = pd.to_datetime(bars[0]["timestamp"])
+        last_ts  = pd.to_datetime(bars[-1]["timestamp"])
         fig.update_layout(
             template="plotly_dark", height=400,
             margin=dict(l=0, r=0, t=30, b=0),
             xaxis_rangeslider_visible=False,
         )
+        fig.update_xaxes(range=[first_ts, last_ts])
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info(f"Warte auf {tf} Bars...")

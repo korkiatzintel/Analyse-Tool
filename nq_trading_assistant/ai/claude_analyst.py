@@ -216,20 +216,13 @@ class ClaudeAnalyst:
         )
         ts_str = _utc_now()
 
-        logger.info("[%s] Calling Claude (%s) with prompt caching…", ts_str, _MODEL)
+        logger.info("[%s] Calling Claude (%s)…", ts_str, _MODEL)
 
         message = await self._client.messages.create(
             model=_MODEL,
             max_tokens=_MAX_TOKENS,
-            system=[
-                {
-                    "type": "text",
-                    "text": _SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
-            betas=["prompt-caching-2024-07-31"],
         )
 
         # Token counts — cache fields may be absent on older SDK versions
