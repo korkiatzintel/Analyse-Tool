@@ -211,6 +211,13 @@ class FreeDataClient:
             len(self._bars["1m"]), len(self._bars["5m"]), len(self._bars["15m"]),
             self._vix,
         )
+        # Emit context immediately after warm-up so ui_state.json is written
+        # without waiting for the first 60-second poll cycle.
+        if self.on_market_context:
+            try:
+                await self.on_market_context(self.get_snapshot())
+            except Exception:
+                logger.exception("on_market_context (warm-up) callback error")
 
     async def _poll_cycle(self) -> None:
         loop = asyncio.get_event_loop()

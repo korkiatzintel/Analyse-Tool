@@ -310,28 +310,28 @@ async def _stream_free() -> None:
             logger.exception("FreeDataClient on_time_bar DataBuffer error")
 
     async def on_market_context(ctx: dict) -> None:
-        """Full evaluation cycle triggered on every poll (60s)."""
+        """Full evaluation cycle — triggered after warm-up and every 60s poll."""
+        # Persist snapshot immediately so _write_ui_state always has current data.
+        _APP.contract          = "NQ=F (yfinance)"
+        _APP.connected         = True
+        _APP.last_free_snap    = ctx
+        _APP.last_free_poll_ts = time.monotonic()
         try:
-            free_snap = client.get_snapshot()
-            rec = _APP.signal_engine.evaluate_multi_tf(free_snap)
+            rec = _APP.signal_engine.evaluate_multi_tf(ctx)
             _APP.last_rec = _APP.signal_engine.to_dict(rec)
-            _APP.contract = "NQ=F (yfinance)"
-            _APP.connected = True
-            _APP.last_free_snap    = free_snap
-            _APP.last_free_poll_ts = time.monotonic()
 
             if rec is not None:
                 result = await _APP.claude.analyze({
                     "recommendation": _APP.last_rec,
-                    "free_snapshot":  free_snap,
+                    "free_snapshot":  ctx,
                 })
                 if not result.get("skipped"):
                     _APP.last_claude = result
                     _log_verdict(result)
-
-            _write_ui_state()
         except Exception:
             logger.exception("Free-data signal/AI pipeline error — continuing.")
+        finally:
+            _write_ui_state()
 
     client.on_tick           = on_tick
     client.on_time_bar       = on_time_bar
