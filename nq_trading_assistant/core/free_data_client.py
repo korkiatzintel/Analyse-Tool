@@ -258,6 +258,10 @@ class FreeDataClient:
                 if df.empty:
                     continue
 
+                df = _flatten_df(df)
+                if df.empty:
+                    continue
+
                 df = df.dropna(subset=["Close"])
                 bars  = _df_to_bars(df, tf)
                 last  = self._last_bar_ts[tf]
@@ -287,6 +291,7 @@ class FreeDataClient:
         try:
             df = yf.download("^VIX", period="2d", interval="1m",
                              progress=False, auto_adjust=True)
+            df = _flatten_df(df)
             if not df.empty:
                 self._vix = float(df["Close"].dropna().iloc[-1])
         except Exception:
@@ -296,6 +301,7 @@ class FreeDataClient:
         try:
             df = yf.download("^TNX", period="2d", interval="1d",
                              progress=False, auto_adjust=True)
+            df = _flatten_df(df)
             if not df.empty:
                 self._yield_10y = float(df["Close"].dropna().iloc[-1])
         except Exception:
@@ -584,6 +590,26 @@ def _parse_event_time(time_str: str) -> Optional[datetime]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _flatten_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns returned by yfinance for futures symbols
+    (e.g. ('Close', 'NQ=F') → 'Close') and normalise to Title Case."""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    if "Close" not in df.columns:
+        col_map = {c.lower(): c for c in df.columns}
+        if "close" not in col_map:
+            logger.warning("_flatten_df: no Close column — columns: %s", list(df.columns))
+            return pd.DataFrame()
+        rename = {
+            col_map[std.lower()]: std
+            for std in ("Close", "Open", "High", "Low", "Volume")
+            if std.lower() in col_map and col_map[std.lower()] != std
+        }
+        if rename:
+            df = df.rename(columns=rename)
+    return df
+
 
 def _df_to_bars(df: pd.DataFrame, timeframe: str) -> List[dict]:
     bars = []
