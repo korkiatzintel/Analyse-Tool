@@ -62,8 +62,9 @@ class TradovateClient:
             "password":   self.password,
             "appId":      self.app_id,
             "appVersion": self.app_version,
-            "cid":        0,
-            "sec":        "",
+            "cid":        8,
+            "sec":        "bd239b23-52a8-4f88-8f4b-4c8b8e0b5f9f",
+            "deviceId":   "python-client",
         }
         async with self._session.post(
             f"{DEMO_REST_URL}/auth/accesstokenrequest",
@@ -71,6 +72,7 @@ class TradovateClient:
         ) as resp:
             data = await resp.json()
 
+        logger.info(f"Tradovate Auth Response: {data}")
         if "accessToken" not in data:
             raise ConnectionError(f"Tradovate Auth fehlgeschlagen: {data}")
 
