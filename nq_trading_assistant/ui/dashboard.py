@@ -630,6 +630,10 @@ def _no_data_screen() -> None:
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
+_LEARNING_RESULT  = Path(__file__).parent.parent / "logs" / "last_learning_result.json"
+_LEARNING_TRIGGER = Path(__file__).parent.parent / "logs" / "run_learning.trigger"
+
+
 def main() -> None:
     _init_ss()
 
@@ -660,126 +664,268 @@ def main() -> None:
     )
     st.markdown("---")
 
-    # ── Chart Timeframe-Auswahl ─────────────────────────────────────────────
-    tf = st.radio("Chart Timeframe", ["1m", "5m", "15m"],
-                  horizontal=True, index=1)
-    lookback = st.select_slider(
-        "Zeitraum",
-        options=["2h", "4h", "8h", "12h", "24h", "48h"],
-        value="8h",
-    )
-    lookback_map = {
-        "1m":  {"2h": 120, "4h": 240, "8h": 480, "12h": 720, "24h": 1440, "48h": 2880},
-        "5m":  {"2h": 24,  "4h": 48,  "8h": 96,  "12h": 144, "24h": 288,  "48h": 576},
-        "15m": {"2h": 8,   "4h": 16,  "8h": 32,  "12h": 48,  "24h": 96,   "48h": 192},
-    }
-    n_bars = lookback_map.get(tf, {}).get(lookback, 96)
-    bars = state.get("bars", {}).get(tf, [])[-n_bars:]
-    if bars:
-        df = pd.DataFrame(bars)
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=df["timestamp"], open=df["open"], high=df["high"],
-            low=df["low"], close=df["close"], name="NQ",
-            increasing_line_color="#00ff88", decreasing_line_color="#ff4444",
-        ))
-        if len(df) >= 21:
-            df["ema9"]  = df["close"].ewm(span=9).mean()
-            df["ema21"] = df["close"].ewm(span=21).mean()
-            fig.add_trace(go.Scatter(
-                x=df["timestamp"], y=df["ema9"],
-                name="EMA9", line=dict(color="#00aaff", width=1),
-            ))
-            fig.add_trace(go.Scatter(
-                x=df["timestamp"], y=df["ema21"],
-                name="EMA21", line=dict(color="#ff6600", width=1),
-            ))
-        signals = state.get("signals", {})
-        trade_setup = signals.get("trade_setup")
-        if trade_setup and signals.get("direction") != "NEUTRAL":
-            direction = signals.get("direction")
-            color = "#00ff88" if direction == "LONG" else "#ff4444"
-            fig.add_hline(
-                y=trade_setup["entry_price"], line_color=color,
-                line_width=2,
-                annotation_text=f"Entry {trade_setup['entry_price']:.2f}",
-            )
-            fig.add_hline(
-                y=trade_setup["stop_loss_price"], line_color="#ff0000",
-                line_dash="dash",
-                annotation_text=f"SL {trade_setup['stop_loss_price']:.2f}",
-            )
-            fig.add_hline(
-                y=trade_setup["take_profit_1_price"], line_color="#00ff88",
-                line_dash="dash",
-                annotation_text=f"TP1 {trade_setup['take_profit_1_price']:.2f}",
-            )
-            fig.add_hline(
-                y=trade_setup["take_profit_2_price"], line_color="#00ff88",
-                line_dash="dot",
-                annotation_text=f"TP2 {trade_setup['take_profit_2_price']:.2f}",
-            )
-        market = state.get("market", {})
-        if market.get("session_high"):
-            fig.add_hline(
-                y=market["session_high"], line_color="#888888",
-                line_dash="dot", annotation_text="Session High",
-            )
-            fig.add_hline(
-                y=market["session_low"], line_color="#888888",
-                line_dash="dot", annotation_text="Session Low",
-            )
-        first_ts = pd.to_datetime(bars[0]["timestamp"])
-        last_ts  = pd.to_datetime(bars[-1]["timestamp"])
-        fig.update_layout(
-            template="plotly_dark", height=400,
-            margin=dict(l=0, r=0, t=30, b=0),
-            xaxis_rangeslider_visible=False,
-        )
-        fig.update_xaxes(range=[first_ts, last_ts])
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info(f"Warte auf {tf} Bars...")
+    tab1, tab2, tab3 = st.tabs(["📈 Live Trading", "📊 Trade Journal", "🧠 KI Lernen"])
 
-    # ── Konfidenz-Analyse Panel ─────────────────────────────────────────────
-    with st.expander("🔍 Konfidenz-Analyse", expanded=False):
-        signals_list = state.get("signals", {}).get("signals", [])
-        confidence   = state.get("signals", {}).get("confidence", 0)
-        st.markdown(f"### Gesamtkonfidenz: {confidence:.0%}")
-        st.progress(confidence)
-        if confidence >= 0.80:
-            st.success("✅ SEHR HOCH — Signal wird ausgegeben")
-        elif confidence >= 0.65:
-            st.warning("⚡ HOCH — Signal wird ausgegeben")
+    with tab1:
+        # ── Chart Timeframe-Auswahl ─────────────────────────────────────────
+        tf = st.radio("Chart Timeframe", ["1m", "5m", "15m"],
+                      horizontal=True, index=1)
+        lookback = st.select_slider(
+            "Zeitraum",
+            options=["2h", "4h", "8h", "12h", "24h", "48h"],
+            value="8h",
+        )
+        lookback_map = {
+            "1m":  {"2h": 120, "4h": 240, "8h": 480, "12h": 720, "24h": 1440, "48h": 2880},
+            "5m":  {"2h": 24,  "4h": 48,  "8h": 96,  "12h": 144, "24h": 288,  "48h": 576},
+            "15m": {"2h": 8,   "4h": 16,  "8h": 32,  "12h": 48,  "24h": 96,   "48h": 192},
+        }
+        n_bars = lookback_map.get(tf, {}).get(lookback, 96)
+        bars = state.get("bars", {}).get(tf, [])[-n_bars:]
+        if bars:
+            df = pd.DataFrame(bars)
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(
+                x=df["timestamp"], open=df["open"], high=df["high"],
+                low=df["low"], close=df["close"], name="NQ",
+                increasing_line_color="#00ff88", decreasing_line_color="#ff4444",
+            ))
+            if len(df) >= 21:
+                df["ema9"]  = df["close"].ewm(span=9).mean()
+                df["ema21"] = df["close"].ewm(span=21).mean()
+                fig.add_trace(go.Scatter(
+                    x=df["timestamp"], y=df["ema9"],
+                    name="EMA9", line=dict(color="#00aaff", width=1),
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df["timestamp"], y=df["ema21"],
+                    name="EMA21", line=dict(color="#ff6600", width=1),
+                ))
+            sigs_state  = state.get("signals", {})
+            trade_setup = sigs_state.get("trade_setup")
+            if trade_setup and sigs_state.get("direction") != "NEUTRAL":
+                direction = sigs_state.get("direction")
+                color = "#00ff88" if direction == "LONG" else "#ff4444"
+                fig.add_hline(
+                    y=trade_setup["entry_price"], line_color=color,
+                    line_width=2,
+                    annotation_text=f"Entry {trade_setup['entry_price']:.2f}",
+                )
+                fig.add_hline(
+                    y=trade_setup["stop_loss_price"], line_color="#ff0000",
+                    line_dash="dash",
+                    annotation_text=f"SL {trade_setup['stop_loss_price']:.2f}",
+                )
+                fig.add_hline(
+                    y=trade_setup["take_profit_1_price"], line_color="#00ff88",
+                    line_dash="dash",
+                    annotation_text=f"TP1 {trade_setup['take_profit_1_price']:.2f}",
+                )
+                fig.add_hline(
+                    y=trade_setup["take_profit_2_price"], line_color="#00ff88",
+                    line_dash="dot",
+                    annotation_text=f"TP2 {trade_setup['take_profit_2_price']:.2f}",
+                )
+            market_chart = state.get("market", {})
+            if market_chart.get("session_high"):
+                fig.add_hline(
+                    y=market_chart["session_high"], line_color="#888888",
+                    line_dash="dot", annotation_text="Session High",
+                )
+                fig.add_hline(
+                    y=market_chart["session_low"], line_color="#888888",
+                    line_dash="dot", annotation_text="Session Low",
+                )
+            first_ts = pd.to_datetime(bars[0]["timestamp"])
+            last_ts  = pd.to_datetime(bars[-1]["timestamp"])
+            fig.update_layout(
+                template="plotly_dark", height=400,
+                margin=dict(l=0, r=0, t=30, b=0),
+                xaxis_rangeslider_visible=False,
+            )
+            fig.update_xaxes(range=[first_ts, last_ts])
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("❌ ZU NIEDRIG — Kein Trade-Signal (Schwelle: 65%)")
+            st.info(f"Warte auf {tf} Bars...")
+
+        # ── Konfidenz-Analyse Panel ─────────────────────────────────────────
+        with st.expander("🔍 Konfidenz-Analyse", expanded=False):
+            signals_list = state.get("signals", {}).get("signals", [])
+            confidence   = state.get("signals", {}).get("confidence", 0)
+            st.markdown(f"### Gesamtkonfidenz: {confidence:.0%}")
+            st.progress(confidence)
+            if confidence >= 0.80:
+                st.success("✅ SEHR HOCH — Signal wird ausgegeben")
+            elif confidence >= 0.65:
+                st.warning("⚡ HOCH — Signal wird ausgegeben")
+            else:
+                st.error("❌ ZU NIEDRIG — Kein Trade-Signal (Schwelle: 65%)")
+            st.divider()
+            for s in signals_list:
+                s_dir = s.get("direction")
+                icon  = ("🟢" if s_dir in ["BULLISH", "LONG"] else
+                         "🔴" if s_dir in ["BEARISH", "SHORT"] else "⚪")
+                col_a, col_b = st.columns([4, 1])
+                with col_a:
+                    st.markdown(f"{icon} **{s.get('type', '?')}** — {s.get('description', '')}")
+                with col_b:
+                    st.metric("", f"{s.get('confidence', 0):.0%}")
+                st.progress(s.get("confidence", 0))
+            st.caption(
+                f"Berechnet: {state.get('last_update', '—')} | Nächstes Update: ~60s"
+            )
+
+        # ── Three columns ───────────────────────────────────────────────────
+        left, mid, right = st.columns([3, 4, 3])
+        with left:
+            _col_market(state)
+        with mid:
+            _col_signals(state)
+        with right:
+            _col_ai(state)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 2 — Trade Journal
+    # ══════════════════════════════════════════════════════════════════════
+
+    with tab2:
+        sim_stats = state.get("sim_stats", {})
+
+        if sim_stats.get("total", 0) > 0:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Trades gesamt", sim_stats["total"])
+            c2.metric(
+                "Win-Rate", f"{sim_stats['win_rate']}%",
+                delta=f"{sim_stats['win_rate'] - 65:.1f}% vs Ziel",
+            )
+            c3.metric("Avg P&L", f"{sim_stats['avg_pnl_points']:+.1f} Punkte")
+            c4.metric("Gesamt P&L", f"${sim_stats['total_pnl_usd']:+.0f}")
+
+            # Offene Trades
+            open_trades = state.get("open_trades", [])
+            if open_trades:
+                st.subheader(f"🔄 Offene Trades ({len(open_trades)})")
+                for t in open_trades:
+                    direction_icon = "▲" if t["direction"] == "LONG" else "▼"
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.markdown(f"{direction_icon} **{t['direction']}**")
+                    col2.metric("Entry", f"{t['entry_price']:.2f}")
+                    col3.metric("SL",    f"{t['stop_loss']:.2f}")
+                    col4.metric("TP1",   f"{t['take_profit_1']:.2f}")
+                    st.caption(
+                        f"Signale: {', '.join(t['active_signals'])} | "
+                        f"Konfidenz: {t['confidence']:.0%} | "
+                        f"Einstieg: {t['timestamp_entry'][:16]}"
+                    )
+                    st.divider()
+
+            # Geschlossene Trades
+            recent = state.get("recent_trades", [])
+            if recent:
+                st.subheader("📋 Letzte abgeschlossene Trades")
+                for t in recent:
+                    outcome = t.get("outcome", "?")
+                    pnl     = t.get("pnl_points", 0)
+                    if outcome == "WIN":
+                        st.success(
+                            f"✅ {t['direction']} | Entry {t['entry_price']:.2f} → "
+                            f"Exit {t.get('exit_price', 0):.2f} | "
+                            f"+{pnl:.1f} Punkte | {t.get('exit_reason')} | "
+                            f"{t.get('duration_minutes', 0):.0f} Min"
+                        )
+                    elif outcome == "LOSS":
+                        st.error(
+                            f"❌ {t['direction']} | Entry {t['entry_price']:.2f} → "
+                            f"Exit {t.get('exit_price', 0):.2f} | "
+                            f"{pnl:.1f} Punkte | SL | "
+                            f"{t.get('duration_minutes', 0):.0f} Min"
+                        )
+                    else:
+                        st.info(
+                            f"⏱️ {t['direction']} | {pnl:+.1f} Punkte | "
+                            f"TIMEOUT | {t.get('duration_minutes', 0):.0f} Min"
+                        )
+                    st.caption(f"Signale: {', '.join(t.get('active_signals', []))}")
+
+            # Win-Rate nach Signal-Typ
+            best_signals = sim_stats.get("best_signal_types", {})
+            if best_signals:
+                st.subheader("🏆 Signal Performance")
+                for sig, wr in best_signals.items():
+                    col_a, col_b = st.columns([3, 1])
+                    col_a.markdown(f"**{sig}**")
+                    col_b.metric("Win-Rate", f"{wr}%")
+                    st.progress(wr / 100)
+        else:
+            st.info("Noch keine simulierten Trades. App muss mindestens 60 Sekunden laufen.")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 3 — KI Lernen
+    # ══════════════════════════════════════════════════════════════════════
+
+    with tab3:
+        st.subheader("🧠 Tägliche KI-Lernanalyse")
+
+        try:
+            last_result = json.loads(
+                _LEARNING_RESULT.read_text(encoding="utf-8")
+            )
+            if last_result.get("status") == "success":
+                result_data = last_result["result"]
+                stats_snap  = last_result["stats"]
+
+                st.success(f"✅ Letzte Analyse: {stats_snap['total']} Trades analysiert")
+
+                analyse = result_data.get("analyse", {})
+                st.markdown(f"**Zusammenfassung:** {analyse.get('zusammenfassung', '')}")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**💪 Stärken:**")
+                    for s in analyse.get("staerken", []):
+                        st.markdown(f"• {s}")
+                with col2:
+                    st.markdown("**⚠️ Schwächen:**")
+                    for s in analyse.get("schwaechen", []):
+                        st.markdown(f"• {s}")
+
+                st.markdown("**🔍 Erkannte Muster:**")
+                for m in analyse.get("muster", []):
+                    st.markdown(f"• {m}")
+
+                st.markdown("**✅ Handlungsempfehlungen:**")
+                for r in result_data.get("handlungsempfehlungen", []):
+                    st.markdown(f"• {r}")
+
+                st.subheader("📊 Aktuelle Signal-Gewichtungen")
+                weights = state.get("signal_weights", {})
+                for k, v in weights.items():
+                    if not k.startswith("_") and isinstance(v, (int, float)):
+                        col_a, col_b = st.columns([3, 1])
+                        col_a.markdown(f"**{k}**")
+                        col_b.metric("Gewicht", f"{v:.2f}", delta=f"{v - 1.0:+.2f}")
+
+            elif last_result.get("status") == "insufficient_data":
+                st.warning(last_result["message"])
+
+        except Exception:
+            st.info("Noch keine Lernanalyse durchgeführt.")
+
         st.divider()
-        for s in signals_list:
-            s_dir = s.get("direction")
-            icon  = ("🟢" if s_dir in ["BULLISH", "LONG"] else
-                     "🔴" if s_dir in ["BEARISH", "SHORT"] else "⚪")
-            col_a, col_b = st.columns([4, 1])
-            with col_a:
-                st.markdown(f"{icon} **{s.get('type', '?')}** — {s.get('description', '')}")
-            with col_b:
-                st.metric("", f"{s.get('confidence', 0):.0%}")
-            st.progress(s.get("confidence", 0))
-        st.caption(
-            f"Berechnet: {state.get('last_update', '—')} | Nächstes Update: ~60s"
-        )
+        sim_stats    = state.get("sim_stats", {})
+        total_trades = sim_stats.get("total", 0)
 
-    # ── Three columns ───────────────────────────────────────────────────────
-    left, mid, right = st.columns([3, 4, 3])
-
-    with left:
-        _col_market(state)
-
-    with mid:
-        _col_signals(state)
-
-    with right:
-        _col_ai(state)
+        if total_trades >= 5:
+            if st.button("🧠 Jetzt Lernanalyse starten", type="primary"):
+                _LEARNING_TRIGGER.parent.mkdir(exist_ok=True)
+                _LEARNING_TRIGGER.write_text("1")
+                st.success("Analyse gestartet… Dashboard in 30 Sekunden aktualisieren.")
+        else:
+            st.info(f"Mindestens 5 Trades benötigt. Aktuell: {total_trades}")
+            st.caption(
+                "Trades werden automatisch simuliert sobald Signale > 65% Konfidenz auftreten."
+            )
 
     # ── Footer / auto-refresh countdown ────────────────────────────────────
     now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")

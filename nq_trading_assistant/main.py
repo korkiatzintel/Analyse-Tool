@@ -36,8 +36,10 @@ from pathlib import Path
 _LOG_DIR = Path(__file__).parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 _LOG_FILE     = _LOG_DIR / "app.log"
-_STATE_FILE   = _LOG_DIR / "ui_state.json"    # read by dashboard.py
-_COMMAND_FILE = _LOG_DIR / "ui_command.json"  # written by dashboard.py "force" button
+_STATE_FILE    = _LOG_DIR / "ui_state.json"    # read by dashboard.py
+_COMMAND_FILE  = _LOG_DIR / "ui_command.json"  # written by dashboard.py "force" button
+_LEARNING_TRIGGER = _LOG_DIR / "run_learning.trigger"
+_LEARNING_RESULT  = _LOG_DIR / "last_learning_result.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +73,8 @@ from core.free_data_client import FreeDataClient
 from signals.order_flow import OrderFlowAnalyzer
 from signals.signal_engine import SignalEngine
 from ai.claude_analyst import ClaudeAnalyst
+from trading.simulator import TradeSimulator
+from ai.learning_analyst import LearningAnalyst
 
 # ---------------------------------------------------------------------------
 # Application state — shared between async loop and UI subprocess
@@ -100,8 +104,32 @@ class AppComponents:
         self.last_free_poll_ts: float               = 0.0
         self.delta_history:     collections.deque   = collections.deque(maxlen=120)
 
+        # Trade simulation & learning
+        self.simulator:    TradeSimulator = TradeSimulator()
+
 
 _APP = AppComponents()
+
+# Learning analyst is instantiated lazily (needs Anthropic client)
+_LEARNING_ANALYST: "LearningAnalyst | None" = None
+
+
+def _get_learning_analyst() -> LearningAnalyst:
+    global _LEARNING_ANALYST
+    if _LEARNING_ANALYST is None:
+        import anthropic
+        _LEARNING_ANALYST = LearningAnalyst(anthropic.Anthropic())
+    return _LEARNING_ANALYST
+
+
+def run_learning_analysis() -> dict:
+    analyst = _get_learning_analyst()
+    result  = analyst.run_daily_analysis(_APP.simulator)
+    _LEARNING_RESULT.write_text(
+        json.dumps(result, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return result
 
 # ---------------------------------------------------------------------------
 # Callback pipeline
@@ -251,6 +279,10 @@ def _write_ui_state() -> None:
             "event_window_active":       free.get("event_window_active", False),
             "minutes_to_next_event":     free.get("minutes_to_next_event"),
             "delta_history":             list(_APP.delta_history),
+            "sim_stats":                 _APP.simulator.get_stats(),
+            "open_trades":               _APP.simulator.get_open_trades(),
+            "recent_trades":             _APP.simulator.get_closed_trades(limit=10),
+            "signal_weights":            _APP.simulator.get_weights(),
         }
 
         tmp = _STATE_FILE.with_suffix(".tmp")
@@ -321,12 +353,17 @@ async def _stream_free() -> None:
 
     async def on_market_context(ctx: dict) -> None:
         """Full evaluation cycle — triggered after warm-up and every 60s poll."""
-        # Persist snapshot immediately so _write_ui_state always has current data.
         _APP.contract          = "NQ=F (yfinance)"
         _APP.connected         = True
         _APP.last_free_snap    = ctx
         _APP.last_free_poll_ts = time.monotonic()
         try:
+            current_price = ctx.get("last_price", 0) or 0
+
+            # Update open simulated trades first
+            if current_price > 0:
+                _APP.simulator.update_open_trades(current_price)
+
             scan = _APP.signal_engine.scan_trades(ctx)
             _APP.last_scan = scan
             best = scan["best_signal"]
@@ -344,6 +381,24 @@ async def _stream_free() -> None:
                 "atr":         ts.get("atr_used"),
                 "raw_score":   0.0,
             }
+
+            # Open simulated trade when signal fires
+            trade_id = _APP.simulator.open_trade(best, ctx)
+            if trade_id:
+                logger.info(
+                    "Neuer Sim-Trade %s: %s @ %.2f (conf=%.0f%%)",
+                    trade_id, best.get("direction"), current_price,
+                    best.get("confidence", 0) * 100,
+                )
+
+            # Check learning trigger file
+            if _LEARNING_TRIGGER.exists():
+                _LEARNING_TRIGGER.unlink(missing_ok=True)
+                try:
+                    result = run_learning_analysis()
+                    logger.info("Learning Analysis: %s", result.get("status"))
+                except Exception:
+                    logger.exception("Learning Analysis Fehler")
 
             if scan["any_signal"]:
                 result = await _APP.claude.analyze({

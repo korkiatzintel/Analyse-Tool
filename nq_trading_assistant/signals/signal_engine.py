@@ -10,8 +10,11 @@ Usage:
     # result is a TradeRecommendation or None (confidence too low)
 """
 
+import json
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from signals.order_flow import Direction, OrderFlowAnalyzer, Signal, SignalType
@@ -34,6 +37,8 @@ from signals.free_signals import (
 )
 
 logger = logging.getLogger(__name__)
+
+_WEIGHTS_FILE = Path(__file__).parent.parent / "logs" / "signal_weights.json"
 
 # Per-signal-type weights (sum need not equal 1 — we normalise)
 _WEIGHTS: Dict[str, float] = {
@@ -164,6 +169,9 @@ class SignalEngine:
         self._free_analyzer = FreeMarketAnalyzer()
         self.trade_setup    = TradeSetup()
         self.threshold      = _MIN_CONFIDENCE
+        self._learned_weights: Dict[str, float] = {}
+        self._weights_mtime: float = 0.0
+        self._reload_weights()
 
     def evaluate(
         self,
@@ -523,6 +531,64 @@ class SignalEngine:
         return bull_score, bear_score, bull_sigs, bear_sigs
 
     # ==================================================================
+    # Learned weight management
+    # ==================================================================
+
+    def _reload_weights(self) -> None:
+        """Re-read signal_weights.json if the file has changed since last load."""
+        try:
+            mtime = _WEIGHTS_FILE.stat().st_mtime
+        except OSError:
+            return
+        if mtime <= self._weights_mtime:
+            return
+        try:
+            data = json.loads(_WEIGHTS_FILE.read_text(encoding="utf-8"))
+            self._learned_weights = {k: float(v) for k, v in data.items()
+                                     if isinstance(v, (int, float))}
+            self._weights_mtime   = mtime
+            logger.info("Signal weights reloaded from %s", _WEIGHTS_FILE.name)
+        except Exception as e:
+            logger.warning("Could not reload signal weights: %s", e)
+
+    def _apply_learned_weights(
+        self, signals: List[dict], ctx: dict
+    ) -> List[dict]:
+        """Apply learned per-signal weights and context modifiers in-place."""
+        if not self._learned_weights:
+            return signals
+
+        vix_regime   = ctx.get("vix_regime", "normal")
+        hour         = __import__("datetime").datetime.utcnow().hour
+        time_of_day  = (
+            "RTH_OPEN"  if 13 <= hour < 14 else
+            "RTH_MID"   if 14 <= hour < 19 else
+            "RTH_CLOSE" if 19 <= hour < 21 else
+            "PREMARKET"
+        )
+
+        result = []
+        for s in signals:
+            sig_type   = s.get("type", "")
+            base_conf  = s.get("confidence", 0.0)
+            weight     = self._learned_weights.get(sig_type, 1.0)
+            new_conf   = base_conf * weight
+
+            # Context modifiers
+            if vix_regime in ("high", "HIGH"):
+                new_conf *= self._learned_weights.get("_vix_high_penalty", 0.8)
+            elif vix_regime in ("extreme", "EXTREME"):
+                new_conf *= self._learned_weights.get("_vix_extreme_penalty", 0.5)
+
+            if time_of_day == "RTH_OPEN":
+                new_conf *= self._learned_weights.get("_time_open_bonus", 1.2)
+            elif time_of_day == "RTH_CLOSE":
+                new_conf *= self._learned_weights.get("_time_close_penalty", 0.9)
+
+            result.append({**s, "confidence": round(min(0.99, new_conf), 3)})
+        return result
+
+    # ==================================================================
     # Trade Scanner — always returns 3 candidates
     # ==================================================================
 
@@ -532,6 +598,8 @@ class SignalEngine:
         confidence (highest first).  A candidate is marked as "signal" when
         confidence >= self.threshold.
         """
+        self._reload_weights()
+
         price  = ctx.get("last_price", 0) or 0
         atr    = compute_atr(ctx.get("bars_5m", [])) or _FALLBACK_ATR
         vwap   = ctx.get("session_vwap") or None
@@ -617,16 +685,17 @@ class SignalEngine:
         }
 
     def _get_all_signals(self, ctx: dict) -> List[dict]:
-        """Return all non-blocking signals as dicts, VIX dampening applied."""
+        """Return all non-blocking signals as dicts, VIX dampening + learned weights applied."""
         free_signals = self._free_analyzer.analyze(ctx)
         if ctx.get("vix", 0.0) > _VIX_HIGH:
             free_signals = _dampen_confidence(free_signals, factor=0.80)
         ta_signals = self._ta_analyzer.analyze(_free_snap_to_data_snap(ctx))
-        return [
+        signals = [
             _signal_to_dict(s)
             for s in (free_signals + ta_signals)
             if not s.metadata.get("block")
         ]
+        return self._apply_learned_weights(signals, ctx)
 
     def _evaluate_direction(self, ctx: dict, direction: str) -> List[dict]:
         """Return all signals that agree with the given direction."""
