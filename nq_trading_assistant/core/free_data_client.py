@@ -101,6 +101,7 @@ class FreeDataClient:
 
         # Realtime price override (Barchart fallback, updated every 10s)
         self._last_price: float = 0.0
+        self._realtime_last_update: str = ""
 
         # Tradovate real-time feed state
         self._tradovate             = None
@@ -228,10 +229,11 @@ class FreeDataClient:
             await self._tradovate.connect_marketdata()
 
             async def on_quote(price: float, bid: float, ask: float) -> None:
-                self._tradovate_price     = price
-                self._tradovate_bid       = bid
-                self._tradovate_ask       = ask
-                self._tradovate_connected = True
+                self._tradovate_price      = price
+                self._tradovate_bid        = bid
+                self._tradovate_ask        = ask
+                self._tradovate_connected  = True
+                self._realtime_last_update = _utc_now()
 
             self._tradovate.on_quote = on_quote
             logger.info("Tradovate: Echtzeit-Feed aktiv ✓")
@@ -269,6 +271,7 @@ class FreeDataClient:
                         price, yf_price, abs(price - yf_price),
                     )
                 self._last_price = price
+                self._realtime_last_update = _utc_now()
             await asyncio.sleep(10)
 
     def _fetch_realtime_price(self) -> float:
@@ -348,7 +351,9 @@ class FreeDataClient:
                 round(self._tradovate_ask - self._tradovate_bid, 2)
                 if self._tradovate_bid > 0 and self._tradovate_ask > 0 else None
             ),
-            "tradovate_connected": self._tradovate_connected,
+            "tradovate_connected":    self._tradovate_connected,
+            "realtime_price":         self._tradovate_price or self._last_price,
+            "realtime_last_update":   self._realtime_last_update,
         }
 
     # ------------------------------------------------------------------

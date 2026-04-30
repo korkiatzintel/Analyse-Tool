@@ -142,7 +142,34 @@ def _sidebar(state: Optional[dict]) -> None:
                 icon = "🔴"
             st.markdown(f"{icon} **{label}**")
             st.caption(f"Kontrakt: **{contract}**")
-            st.caption(f"Update: {updated[-8:] if updated != '–' else '–'} UTC")
+
+            # Dynamic yfinance countdown (60s cycle)
+            try:
+                last_dt = datetime.fromisoformat(updated.replace(" UTC", ""))
+                seconds_ago = int(
+                    (datetime.now(timezone.utc).replace(tzinfo=None)
+                     - last_dt).total_seconds()
+                )
+                next_update_in = max(0, 60 - seconds_ago)
+                if next_update_in > 10:
+                    st.metric("Nächstes yfinance Update", f"{next_update_in}s")
+                else:
+                    st.warning(f"⏳ Update in {next_update_in}s…")
+            except Exception:
+                st.caption(f"Update: {updated[-8:] if updated != '–' else '–'} UTC")
+
+            # Dynamic realtime price countdown (30s cycle)
+            realtime_last = state.get("realtime_last_update", "")
+            try:
+                rt_dt  = datetime.fromisoformat(realtime_last.replace(" UTC", ""))
+                rt_ago = int(
+                    (datetime.now(timezone.utc).replace(tzinfo=None)
+                     - rt_dt).total_seconds()
+                )
+                rt_next = max(0, 30 - rt_ago)
+                st.metric("Preis Update (Barchart)", f"{rt_next}s")
+            except Exception:
+                pass
 
             # Tradovate feed status
             if state.get("tradovate_connected"):
@@ -248,8 +275,17 @@ def _sidebar(state: Optional[dict]) -> None:
 def _col_market(state: dict) -> None:
     st.subheader("Marktdaten")
 
-    market  = state.get("market", {})
-    price   = market.get("last_price") or 0.0
+    market         = state.get("market", {})
+    realtime_price = state.get("realtime_price", 0.0) or 0.0
+    market_price   = market.get("last_price") or 0.0
+
+    if realtime_price > 0:
+        price        = realtime_price
+        price_source = "📡 Barchart (~30s)"
+    else:
+        price        = market_price
+        price_source = "📊 yfinance (~15min)"
+
     vwap    = market.get("vwap")       or 0.0
     s_high  = market.get("session_high")
     s_low   = market.get("session_low")
@@ -269,7 +305,8 @@ def _col_market(state: dict) -> None:
     st.markdown(
         f'<div style="text-align:center;margin-bottom:6px;">'
         f'<span class="{p_cls}">{price:,.2f}</span><br>'
-        f'<span style="color:#888;font-size:.82rem;">NQ Futures</span>'
+        f'<span style="color:#888;font-size:.82rem;">NQ Futures</span><br>'
+        f'<span style="color:#555;font-size:.72rem;">{price_source}</span>'
         f'</div>',
         unsafe_allow_html=True,
     )
