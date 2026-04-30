@@ -110,14 +110,31 @@ class AppComponents:
 
 
 def _create_analyst():
-    """Select KI provider based on available API keys."""
+    """Select KI provider based on available API keys (.env has priority over INI)."""
     import os
+    import configparser
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
-    gemini_key    = os.getenv("GEMINI_API_KEY")
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    config = configparser.ConfigParser()
+    config.read(Path(__file__).parent / "config" / "credentials.ini")
 
+    gemini_key = (
+        os.getenv("GEMINI_API_KEY")
+        or config.get("gemini", "api_key", fallback=None)
+    )
+    anthropic_key = (
+        os.getenv("ANTHROPIC_API_KEY")
+        or config.get("anthropic", "api_key", fallback=None)
+    )
+
+    # Strip placeholder values
+    if gemini_key and gemini_key.strip() in ("dein_gemini_key_hier", "YOUR_GEMINI_API_KEY", ""):
+        gemini_key = None
+    if anthropic_key and anthropic_key.strip() in ("YOUR_ANTHROPIC_API_KEY", ""):
+        anthropic_key = None
+
+    # Gemini hat Vorrang (kostenlos)
     if gemini_key:
         try:
             from ai.gemini_analyst import GeminiAnalyst
