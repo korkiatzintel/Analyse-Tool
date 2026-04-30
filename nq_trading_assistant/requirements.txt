@@ -21,7 +21,7 @@ plotly>=5.20.0
 
 # AI
 anthropic>=0.25.0
-google-generativeai>=0.8.0   # optional — kostenlose Alternative zu Claude
+google-genai>=1.0.0          # optional — kostenlose Alternative zu Claude
 
 # Config & utilities
 python-dotenv>=1.0.0

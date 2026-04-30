@@ -5,7 +5,7 @@ from datetime import datetime
 
 class GeminiAnalyst:
     """
-    Kostenloser KI-Analyst via Google Gemini API.
+    Kostenloser KI-Analyst via Google Gemini API (google-genai SDK).
     Ersetzt Claude für Live-Analyse.
     Limit: 1 500 Requests/Tag mit Gemini 2.0 Flash — mehr als genug.
     """
@@ -17,12 +17,8 @@ class GeminiAnalyst:
     )
 
     def __init__(self, api_key: str):
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        self._model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            system_instruction=self._SYSTEM,
-        )
+        from google import genai
+        self._client       = genai.Client(api_key=api_key)
         self._log          = logging.getLogger(__name__)
         self._last_call    = 0.0
         self._min_interval = 30   # Sekunden zwischen Calls
@@ -43,12 +39,10 @@ class GeminiAnalyst:
 
     async def analyze(self, signal_data: dict) -> dict:
         """Live-Analyse eines Trade-Signals."""
-        # Rate limiting
         elapsed = time.time() - self._last_call
         if elapsed < self._min_interval:
             return {"skipped": True, "reason": "Rate limit"}
 
-        # Flatten nested structure from main.py call convention
         rec  = signal_data.get("recommendation") or signal_data
         snap = signal_data.get("free_snapshot")   or signal_data
 
@@ -70,8 +64,16 @@ class GeminiAnalyst:
         prompt = self._build_signal_prompt(flat)
 
         try:
-            response       = self._model.generate_content(prompt)
-            self._last_call = time.time()
+            from google.genai import types
+            response = self._client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=self._SYSTEM,
+                    max_output_tokens=500,
+                ),
+            )
+            self._last_call  = time.time()
             self.total_calls += 1
             return self._parse_response(response.text.strip())
         except Exception as e:
