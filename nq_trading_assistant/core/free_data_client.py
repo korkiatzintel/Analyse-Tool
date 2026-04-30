@@ -189,17 +189,18 @@ class FreeDataClient:
         load_dotenv(override=True)
 
         username = os.getenv("TRADOVATE_USERNAME")
-        password = os.getenv("TRADOVATE_PASSWORD")
+        password = os.getenv("TRADOVATE_PASSWORD", "")
+        password = password.strip('"').strip("'").strip()
 
         if not username:
             username = self._config.get("tradovate", "username", fallback=None)
         if not password:
             raw = self._config.get("tradovate", "password", fallback=None)
             if raw:
-                password = raw.strip('"').strip("'")
+                password = raw.strip('"').strip("'").strip()
 
         logger.info(
-            f"Tradovate: Username={username}, PW starts with={password[:3] if password else 'None'}"
+            f"Tradovate: PW length={len(password)}, ends with={password[-1] if password else 'None'}"
         )
 
         if not username or not password or username.startswith("deine@"):
