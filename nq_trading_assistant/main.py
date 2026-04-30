@@ -73,6 +73,7 @@ from core.free_data_client import FreeDataClient
 from signals.order_flow import OrderFlowAnalyzer
 from signals.signal_engine import SignalEngine
 from signals.bias_engine import MarketBiasEngine
+from signals.limit_order_engine import LimitOrderEngine
 from trading.simulator import TradeSimulator
 from ai.learning_analyst import LearningAnalyst
 
@@ -84,17 +85,19 @@ class AppComponents:
     """All live components, initialised once and reused across reconnects."""
 
     def __init__(self) -> None:
-        self.order_book    = OrderBook("NQ")
-        self.data_buffer   = DataBuffer()
-        self.of_analyzer   = OrderFlowAnalyzer()
-        self.signal_engine = SignalEngine()
-        self.bias_engine   = MarketBiasEngine()
-        self.claude        = _create_analyst()
+        self.order_book      = OrderBook("NQ")
+        self.data_buffer     = DataBuffer()
+        self.of_analyzer     = OrderFlowAnalyzer()
+        self.signal_engine   = SignalEngine()
+        self.bias_engine     = MarketBiasEngine()
+        self.limit_engine    = LimitOrderEngine()
+        self.claude          = _create_analyst()
         self.rithmic: "RithmicConnectionManager | None" = None
 
         # Most recent outputs — shared with the UI process via _STATE_FILE.
-        self.last_rec:    dict = {}
-        self.last_scan:   dict = {}
+        self.last_rec:          dict = {}
+        self.last_scan:         dict = {}
+        self.last_limit_orders: list = []
         self.last_claude: dict = {}
         self.connected:   bool = False
         self.contract:    str  = "–"
@@ -315,6 +318,7 @@ def _write_ui_state() -> None:
             "realtime_last_update": free.get("realtime_last_update", ""),
             "scan":                      _APP.last_scan,
             "signals":                   _APP.last_rec,
+            "limit_orders":              _APP.last_limit_orders,
             "bias":                      free.get("bias", {}),
             "claude":                    _APP.last_claude,
             "claude_memory":             (_APP.claude.get_memory()[:5]
@@ -434,6 +438,16 @@ async def _stream_free() -> None:
                 "atr":         ts.get("atr_used"),
                 "raw_score":   0.0,
             }
+
+            # Limit order levels — check existing, then recalculate
+            if current_price > 0:
+                _APP.limit_engine.check_triggered(
+                    _APP.last_limit_orders, current_price
+                )
+            triggered = [o for o in _APP.last_limit_orders
+                         if o.get("status") == "TRIGGERED"]
+            new_waiting = _APP.limit_engine.calculate_limit_levels(ctx, bias)
+            _APP.last_limit_orders = triggered[-2:] + new_waiting
 
             # Open simulated trade when signal fires
             trade_id = _APP.simulator.open_trade(best, ctx)

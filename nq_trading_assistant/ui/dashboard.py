@@ -415,6 +415,60 @@ def _col_signals(state: dict) -> None:
     scan       = state.get("scan", {})
     candidates = scan.get("candidates", [])
 
+    # ── Limit Order Levels ─────────────────────────────────────────────────
+    st.subheader("🎯 Limit Orders — Vorausschauende Entries")
+    limit_orders  = state.get("limit_orders", [])
+    current_price = (state.get("realtime_price") or
+                     state.get("market", {}).get("last_price", 0) or 0)
+
+    if not limit_orders:
+        st.info("Warte auf klaren Bias für Limit-Order Berechnung...")
+    else:
+        for order in limit_orders:
+            status      = order.get("status", "WAITING")
+            direction   = order.get("direction", "?")
+            limit_price = order.get("limit_price", 0)
+            order_type  = order.get("type", "?")
+            trigger_txt = order.get("trigger", "")
+            valid_until = order.get("valid_until", "")
+            distance    = abs(current_price - limit_price) if current_price > 0 else 0
+
+            if status == "TRIGGERED":
+                st.success(
+                    f"✅ AUSGELÖST — {direction} @ {limit_price:.2f} | "
+                    f"ausgelöst um {order.get('triggered_at', '?')}"
+                )
+            else:
+                if direction == "LONG":
+                    st.info("⏳ WARTE AUF KAUFLEVEL")
+                else:
+                    st.warning("⏳ WARTE AUF VERKAUFLEVEL")
+
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric(
+                "Limit Preis",
+                f"{limit_price:.2f}",
+                delta=f"{current_price - limit_price:+.2f} vom Markt"
+                      if current_price > 0 else None,
+            )
+            col_b.metric(
+                "Stop Loss",
+                f"{order.get('stop_loss', 0):.2f}",
+                delta=f"{order.get('stop_loss_ticks', 0)} Ticks",
+            )
+            col_c.metric(
+                "Take Profit 1",
+                f"{order.get('take_profit_1', 0):.2f}",
+                delta=f"+{order.get('take_profit_1_ticks', 0)} Ticks",
+            )
+            st.caption(
+                f"📌 {trigger_txt} | Typ: {order_type} | "
+                f"Gültig bis: {valid_until} | "
+                f"Abstand: {distance:.1f} Punkte | "
+                f"RR: 1:{order.get('risk_reward', 1.5)}"
+            )
+            st.divider()
+
     st.subheader("📊 Trade Scanner — Top 3 Setups")
 
     if not candidates:
