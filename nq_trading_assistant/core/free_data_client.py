@@ -99,8 +99,20 @@ class FreeDataClient:
         self._bars: Dict[str, List[dict]] = {"1m": [], "5m": [], "15m": []}
         self._last_bar_ts: Dict[str, int] = {"1m": 0, "5m": 0, "15m": 0}
 
-        # Realtime price override (updated every 10s by _realtime_price_loop)
+        # Realtime price override (Barchart fallback, updated every 10s)
         self._last_price: float = 0.0
+
+        # Tradovate real-time feed state
+        self._tradovate             = None
+        self._tradovate_price: float = 0.0
+        self._tradovate_bid:   float = 0.0
+        self._tradovate_ask:   float = 0.0
+        self._tradovate_connected:   bool = False
+
+        # Config reader (for Tradovate credentials)
+        self._config = configparser.ConfigParser()
+        if _CONFIG_PATH.exists():
+            self._config.read(_CONFIG_PATH)
 
         # Session accumulators
         self._session_date:        Optional[date] = None
@@ -135,8 +147,13 @@ class FreeDataClient:
         self._running = True
         logger.info("FreeDataClient: starting polling loop (interval=%ds)", _POLL_INTERVAL)
 
-        # Spawn realtime price updater (every 10 s, parallel to main loop)
-        asyncio.create_task(self._realtime_price_loop())
+        # Try Tradovate real-time feed first; fall back to Barchart scraper
+        tradovate_ok = await self._init_tradovate()
+        if tradovate_ok:
+            asyncio.create_task(self._tradovate.listen())
+        else:
+            # Barchart fallback (every 10 s, ~5 s delay)
+            asyncio.create_task(self._realtime_price_loop())
 
         # Warm-up: initial fetch with history
         await self._initial_fetch()
@@ -155,6 +172,75 @@ class FreeDataClient:
 
     async def stop(self) -> None:
         self._running = False
+        if self._tradovate:
+            await self._tradovate.disconnect()
+
+    # ------------------------------------------------------------------
+    # Tradovate integration
+    # ------------------------------------------------------------------
+
+    async def _init_tradovate(self) -> bool:
+        """
+        Attempt to connect Tradovate Demo real-time feed.
+        Returns True on success, False when credentials are absent or auth fails.
+        """
+        import os
+        username = (
+            os.getenv("TRADOVATE_USERNAME")
+            or self._config.get("tradovate", "username", fallback=None)
+        )
+        password = (
+            os.getenv("TRADOVATE_PASSWORD")
+            or self._config.get("tradovate", "password", fallback=None)
+        )
+
+        if not username or not password or username.startswith("deine@"):
+            logger.warning(
+                "Tradovate: Keine Credentials — nutze yfinance/Barchart als Preisfeed. "
+                "Setze TRADOVATE_USERNAME und TRADOVATE_PASSWORD in .env"
+            )
+            return False
+
+        try:
+            from core.tradovate_client import TradovateClient
+
+            app_id  = (
+                os.getenv("TRADOVATE_APP_ID")
+                or self._config.get("tradovate", "app_id", fallback="Sample App")
+            )
+            app_ver = (
+                os.getenv("TRADOVATE_APP_VERSION")
+                or self._config.get("tradovate", "app_version", fallback="1.0")
+            )
+
+            self._tradovate = TradovateClient(username, password, app_id, app_ver)
+            await self._tradovate.authenticate()
+            await self._tradovate.get_front_month_symbol()
+            await self._tradovate.connect_marketdata()
+
+            async def on_quote(price: float, bid: float, ask: float) -> None:
+                self._tradovate_price     = price
+                self._tradovate_bid       = bid
+                self._tradovate_ask       = ask
+                self._tradovate_connected = True
+
+            self._tradovate.on_quote = on_quote
+            logger.info("Tradovate: Echtzeit-Feed aktiv ✓")
+            return True
+
+        except Exception as exc:
+            logger.error("Tradovate Init fehlgeschlagen: %s", exc)
+            logger.info("Fallback: nutze Barchart/yfinance Preisfeed")
+            self._tradovate = None
+            return False
+
+    def _get_current_price(self) -> float:
+        """Return best available last price (Tradovate > Barchart > yfinance bar)."""
+        if self._tradovate_connected and self._tradovate_price > 0:
+            return self._tradovate_price
+        if self._last_price > 0:
+            return self._last_price
+        return self._bars["1m"][-1]["close"] if self._bars["1m"] else 0.0
 
     # ------------------------------------------------------------------
     # Realtime price feed (Barchart, ~5 s delay, every 10 s)
@@ -208,8 +294,7 @@ class FreeDataClient:
 
     def get_snapshot(self) -> dict:
         """Return all current market data as a single dict."""
-        yf_price   = self._bars["1m"][-1]["close"] if self._bars["1m"] else 0.0
-        last_price = self._last_price if self._last_price > 0 else yf_price
+        last_price = self._get_current_price()
         yesterday_close = self._yesterday_close or last_price
 
         # Overnight gap
@@ -247,6 +332,14 @@ class FreeDataClient:
             "minutes_to_next_event": mins_to_next,
             # last_price duplicated for DataBuffer compatibility
             "last_volume":         self._bars["1m"][-1].get("volume", 0) if self._bars["1m"] else 0,
+            # Tradovate real-time fields (zero/False when not connected)
+            "bid":                 self._tradovate_bid,
+            "ask":                 self._tradovate_ask,
+            "spread":              (
+                round(self._tradovate_ask - self._tradovate_bid, 2)
+                if self._tradovate_bid > 0 and self._tradovate_ask > 0 else None
+            ),
+            "tradovate_connected": self._tradovate_connected,
         }
 
     # ------------------------------------------------------------------

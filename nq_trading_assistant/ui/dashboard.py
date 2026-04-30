@@ -144,6 +144,12 @@ def _sidebar(state: Optional[dict]) -> None:
             st.caption(f"Kontrakt: **{contract}**")
             st.caption(f"Update: {updated[-8:] if updated != '–' else '–'} UTC")
 
+            # Tradovate feed status
+            if state.get("tradovate_connected"):
+                st.success("📡 Tradovate: Echtzeit")
+            else:
+                st.warning("📡 yfinance: ~15min Delay")
+
         st.divider()
 
         # ── Settings ───────────────────────────────────────────────────────
