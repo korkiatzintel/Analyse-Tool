@@ -42,6 +42,8 @@ class SimulatedTrade:
     outcome:                 Optional[str]   = None
     max_adverse_excursion:   Optional[float] = None
     max_favorable_excursion: Optional[float] = None
+    bias_direction:          str             = "NEUTRAL"
+    bias_probability:        float           = 50.0
 
 
 class TradeSimulator:
@@ -113,6 +115,19 @@ class TradeSimulator:
         if not ts:
             return None
 
+        # Bias filter — no trades against the prevailing bias
+        bias     = ctx.get("bias") or {}
+        bias_dir = bias.get("direction", "NEUTRAL")
+        bias_prob = bias.get("probability", 50)
+        if bias_dir != "NEUTRAL" and bias_prob >= 65:
+            if direction != bias_dir:
+                return None
+
+        # Max 1 open trade at a time; no duplicate direction
+        open_trades = self.get_open_trades()
+        if len(open_trades) >= 1:
+            return None
+
         trade = SimulatedTrade(
             trade_id        = str(uuid.uuid4())[:8],
             timestamp_entry = datetime.utcnow().isoformat(),
@@ -131,6 +146,8 @@ class TradeSimulator:
             atr             = signal.get("atr", 0) or ts.get("atr_used", 0),
             vix_regime      = ctx.get("vix_regime", "normal"),
             time_of_day     = self._get_time_of_day(),
+            bias_direction  = bias_dir,
+            bias_probability = bias_prob,
         )
 
         self._trades.append(asdict(trade))

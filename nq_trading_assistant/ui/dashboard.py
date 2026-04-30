@@ -749,6 +749,40 @@ def main() -> None:
         else:
             st.info(f"Warte auf {tf} Bars...")
 
+        # ── Markt-Bias Panel ───────────────────────────────────────────────
+        bias = state.get("bias", {})
+        if bias:
+            bias_dir  = bias.get("direction", "NEUTRAL")
+            bias_prob = bias.get("probability", 50)
+            bull_prob = bias.get("bull_prob", 50)
+            bear_prob = bias.get("bear_prob", 50)
+            strength  = bias.get("strength", "WEAK")
+
+            st.subheader("🧭 Markt-Bias")
+            col_b1, col_b2, col_b3 = st.columns(3)
+            with col_b1:
+                if bias_dir == "LONG":
+                    st.success(f"▲ BULLISH — {bias_prob:.0f}%")
+                elif bias_dir == "SHORT":
+                    st.error(f"▼ BEARISH — {bias_prob:.0f}%")
+                else:
+                    st.info(f"◆ NEUTRAL — {bias_prob:.0f}%")
+                st.caption(f"Stärke: {strength}")
+            with col_b2:
+                st.metric("🟢 Bullish", f"{bull_prob:.0f}%")
+                st.progress(bull_prob / 100)
+            with col_b3:
+                st.metric("🔴 Bearish", f"{bear_prob:.0f}%")
+                st.progress(bear_prob / 100)
+            with st.expander("📋 Bias-Signale im Detail"):
+                for reason in bias.get("reasons", []):
+                    st.markdown(f"• {reason}")
+            if bias_dir != "NEUTRAL" and bias_prob >= 65:
+                st.info(
+                    f"ℹ️ Nur {bias_dir}-Trades werden simuliert "
+                    f"und als Signal ausgegeben."
+                )
+
         # ── Konfidenz-Analyse Panel ─────────────────────────────────────────
         with st.expander("🔍 Konfidenz-Analyse", expanded=False):
             signals_list = state.get("signals", {}).get("signals", [])

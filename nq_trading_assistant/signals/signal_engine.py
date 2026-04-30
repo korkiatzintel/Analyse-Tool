@@ -672,6 +672,19 @@ class SignalEngine:
             ),
         })
 
+        # Bias filter — suppress signals against the prevailing bias
+        bias           = ctx.get("bias", {})
+        bias_direction = bias.get("direction", "NEUTRAL")
+        bias_prob      = bias.get("probability", 50)
+        if bias_direction != "NEUTRAL" and bias_prob >= 65:
+            for candidate in candidates:
+                if candidate["direction"] != bias_direction:
+                    candidate["is_signal"]       = False
+                    candidate["blocked_reason"]  = (
+                        f"Gegen Markt-Bias "
+                        f"({bias_direction} {bias_prob:.0f}%)"
+                    )
+
         candidates.sort(key=lambda x: x["confidence"], reverse=True)
         for i, c in enumerate(candidates):
             c["rank"] = i + 1

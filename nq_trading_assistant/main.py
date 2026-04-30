@@ -72,7 +72,7 @@ from core.data_buffer import DataBuffer
 from core.free_data_client import FreeDataClient
 from signals.order_flow import OrderFlowAnalyzer
 from signals.signal_engine import SignalEngine
-from ai.claude_analyst import ClaudeAnalyst
+from signals.bias_engine import MarketBiasEngine
 from trading.simulator import TradeSimulator
 from ai.learning_analyst import LearningAnalyst
 
@@ -84,11 +84,12 @@ class AppComponents:
     """All live components, initialised once and reused across reconnects."""
 
     def __init__(self) -> None:
-        self.order_book   = OrderBook("NQ")
-        self.data_buffer  = DataBuffer()
-        self.of_analyzer  = OrderFlowAnalyzer()
+        self.order_book    = OrderBook("NQ")
+        self.data_buffer   = DataBuffer()
+        self.of_analyzer   = OrderFlowAnalyzer()
         self.signal_engine = SignalEngine()
-        self.claude       = ClaudeAnalyst()
+        self.bias_engine   = MarketBiasEngine()
+        self.claude        = _create_analyst()
         self.rithmic: "RithmicConnectionManager | None" = None
 
         # Most recent outputs — shared with the UI process via _STATE_FILE.
@@ -106,6 +107,32 @@ class AppComponents:
 
         # Trade simulation & learning
         self.simulator:    TradeSimulator = TradeSimulator()
+
+
+def _create_analyst():
+    """Select KI provider based on available API keys."""
+    import os
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    gemini_key    = os.getenv("GEMINI_API_KEY")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+
+    if gemini_key:
+        try:
+            from ai.gemini_analyst import GeminiAnalyst
+            logger.info("KI Provider: Google Gemini (kostenlos)")
+            return GeminiAnalyst(gemini_key)
+        except ImportError:
+            logger.warning("google-generativeai nicht installiert — falle zurück auf Claude")
+
+    if anthropic_key:
+        from ai.claude_analyst import ClaudeAnalyst
+        logger.info("KI Provider: Anthropic Claude")
+        return ClaudeAnalyst()
+
+    logger.warning("Kein KI API Key — KI-Analyse deaktiviert")
+    return None
 
 
 _APP = AppComponents()
@@ -184,7 +211,7 @@ async def _evaluate_and_analyze() -> None:
         rec = _APP.signal_engine.evaluate(book_snap, data_snap)
         _APP.last_rec = _APP.signal_engine.to_dict(rec)
 
-        if rec is not None:
+        if rec is not None and _APP.claude is not None:
             signal_data = {
                 "recommendation": _APP.last_rec,
                 "book_snapshot":  book_snap,
@@ -269,9 +296,12 @@ def _write_ui_state() -> None:
             "tradovate_connected": free.get("tradovate_connected", False),
             "scan":                      _APP.last_scan,
             "signals":                   _APP.last_rec,
+            "bias":                      free.get("bias", {}),
             "claude":                    _APP.last_claude,
-            "claude_memory":             _APP.claude.get_memory()[:5],
-            "claude_cost_stats":         _APP.claude.get_cost_stats(),
+            "claude_memory":             (_APP.claude.get_memory()[:5]
+                                          if _APP.claude else []),
+            "claude_cost_stats":         (_APP.claude.get_cost_stats()
+                                          if _APP.claude else {}),
             "vix":                       free.get("vix", 0.0),
             "vix_regime":                free.get("vix_regime", "unknown"),
             "yield_10y":                 free.get("yield_10y", 0.0),
@@ -360,6 +390,10 @@ async def _stream_free() -> None:
         try:
             current_price = ctx.get("last_price", 0) or 0
 
+            # Calculate market bias and inject into ctx
+            bias    = _APP.bias_engine.calculate_bias(ctx)
+            ctx["bias"] = bias
+
             # Update open simulated trades first
             if current_price > 0:
                 _APP.simulator.update_open_trades(current_price)
@@ -400,7 +434,7 @@ async def _stream_free() -> None:
                 except Exception:
                     logger.exception("Learning Analysis Fehler")
 
-            if scan["any_signal"]:
+            if scan["any_signal"] and _APP.claude is not None:
                 result = await _APP.claude.analyze({
                     "recommendation": _APP.last_rec,
                     "free_snapshot":  ctx,
