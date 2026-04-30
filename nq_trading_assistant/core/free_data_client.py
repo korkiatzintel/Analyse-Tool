@@ -185,13 +185,21 @@ class FreeDataClient:
         Returns True on success, False when credentials are absent or auth fails.
         """
         import os
-        username = (
-            os.getenv("TRADOVATE_USERNAME")
-            or self._config.get("tradovate", "username", fallback=None)
-        )
-        password = (
-            os.getenv("TRADOVATE_PASSWORD")
-            or self._config.get("tradovate", "password", fallback=None)
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        username = os.getenv("TRADOVATE_USERNAME")
+        password = os.getenv("TRADOVATE_PASSWORD")
+
+        if not username:
+            username = self._config.get("tradovate", "username", fallback=None)
+        if not password:
+            raw = self._config.get("tradovate", "password", fallback=None)
+            if raw:
+                password = raw.strip('"').strip("'")
+
+        logger.info(
+            f"Tradovate: Username={username}, PW starts with={password[:3] if password else 'None'}"
         )
 
         if not username or not password or username.startswith("deine@"):
