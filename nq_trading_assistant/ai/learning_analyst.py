@@ -49,9 +49,8 @@ Antworte AUSSCHLIESSLICH in folgendem JSON-Format ohne Markdown oder Erklärunge
 Gewichtungen: 0.5 = stark reduzieren, 1.0 = neutral, 1.5 = stark bevorzugen.
 Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
 
-    def __init__(self, client, model: str = "claude-sonnet-4-6"):
-        self._client        = client
-        self._model         = model
+    def __init__(self, analyst_instance):
+        self._analyst       = analyst_instance
         self._log           = logging.getLogger(__name__)
         self._analysis_file = Path(__file__).parent.parent / "logs" / "learning_analysis.json"
 
@@ -70,14 +69,30 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         prompt = self._build_analysis_prompt(stats, closed_trades, current_weights)
 
         try:
-            response = self._client.messages.create(
-                model      = self._model,
-                max_tokens = 2000,
-                system     = self._SYSTEM_PROMPT,
-                messages   = [{"role": "user", "content": prompt}],
-            )
+            if hasattr(self._analyst, "_client"):
+                from google.genai import types
+                client   = self._analyst._client
+                response = client.models.generate_content(
+                    model    = "gemini-2.5-flash",
+                    contents = prompt,
+                    config   = types.GenerateContentConfig(
+                        system_instruction = self._SYSTEM_PROMPT,
+                        max_output_tokens  = 2000,
+                    ),
+                )
+                raw = response.text.strip()
+            elif hasattr(self._analyst, "_anthropic"):
+                response = self._analyst._anthropic.messages.create(
+                    model      = "claude-sonnet-4-6",
+                    max_tokens = 2000,
+                    system     = self._SYSTEM_PROMPT,
+                    messages   = [{"role": "user", "content": prompt}],
+                )
+                raw = response.content[0].text.strip()
+            else:
+                raise Exception("Kein kompatibler KI-Client verfügbar")
 
-            raw    = response.content[0].text.strip()
+            raw    = raw.replace("```json", "").replace("```", "").strip()
             result = json.loads(raw)
 
             analysis_record = {

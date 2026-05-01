@@ -166,8 +166,9 @@ _LEARNING_ANALYST: "LearningAnalyst | None" = None
 def _get_learning_analyst() -> LearningAnalyst:
     global _LEARNING_ANALYST
     if _LEARNING_ANALYST is None:
-        import anthropic
-        _LEARNING_ANALYST = LearningAnalyst(anthropic.Anthropic())
+        if _APP.claude is None:
+            raise RuntimeError("Kein KI Provider verfügbar — bitte GEMINI_API_KEY oder ANTHROPIC_API_KEY setzen")
+        _LEARNING_ANALYST = LearningAnalyst(_APP.claude)
     return _LEARNING_ANALYST
 
 
