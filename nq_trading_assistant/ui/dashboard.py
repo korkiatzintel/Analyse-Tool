@@ -1121,6 +1121,66 @@ def main() -> None:
                     if naechste:
                         st.info(f"📅 Empfehlung für nächste Analyse: {naechste}")
 
+                    # Parameter-Änderungen
+                    update_report     = result_data.get("update_report", {})
+                    param_begruendung = result_data.get("parameter_begruendung", {})
+
+                    if update_report and update_report.get("accepted"):
+                        st.divider()
+                        st.markdown("### 🔧 Angepasste Strategie-Parameter")
+
+                        _SECTION_NAMES = {
+                            "SIGNAL_GEWICHTUNGEN":  "Signal-Gewichtung",
+                            "KONFIDENZ_SCHWELLEN":  "Konfidenz-Schwelle",
+                            "BIAS_PARAMETER":       "Bias-Erkennung",
+                            "RISK_MANAGEMENT":      "Risiko-Management",
+                            "VIX_REGIME_GRENZEN":   "Volatilitäts-Filter",
+                            "KONTEXT_MODIFIKATOREN": "Tageszeit-Anpassung",
+                            "LIMIT_ORDER_PARAMETER": "Limit-Order Einstellung",
+                        }
+                        _KEY_NAMES = {
+                            "FAIR_VALUE_GAP":              "Preislücken-Strategie",
+                            "MULTI_TF_BIAS":               "Trend-Richtungsanalyse",
+                            "EMA_TREND":                   "Gleitender Durchschnitt",
+                            "VWAP_POSITION":               "VWAP-Position",
+                            "RSI_EXTREME":                 "Überkauft/Überverkauft",
+                            "min_confidence_normal":       "Mindest-Konfidenz (normal)",
+                            "min_confidence_vix_high":     "Mindest-Konfidenz (hohe Vola)",
+                            "sl_atr_multiplier":           "Stop-Loss Größe",
+                            "rth_open_bonus":              "Bonus erste Handelsstunde",
+                            "vix_penalty_high":            "Abzug bei hoher Volatilität",
+                        }
+
+                        for change in update_report["accepted"]:
+                            param = change["param"]
+                            old   = change["old"]
+                            new   = change["new"]
+                            delta = change["change"]
+                            parts = param.split(".")
+                            section_k = parts[0] if parts else param
+                            key_k     = parts[-1] if len(parts) > 1 else param
+
+                            anzeige_section = _SECTION_NAMES.get(section_k, section_k)
+                            anzeige_key     = _KEY_NAMES.get(key_k, key_k)
+                            begruendung     = param_begruendung.get(param, "")
+
+                            col1, col2 = st.columns([3, 2])
+                            with col1:
+                                if delta > 0:
+                                    st.success(f"📈 **{anzeige_section}**: {anzeige_key}")
+                                else:
+                                    st.warning(f"📉 **{anzeige_section}**: {anzeige_key}")
+                                if begruendung:
+                                    st.caption(f"💬 {begruendung}")
+                            with col2:
+                                st.metric(
+                                    "Änderung",
+                                    f"{new:.3f}",
+                                    delta=f"{delta:+.3f}",
+                                    delta_color="normal",
+                                )
+                            st.divider()
+
                 elif last_result.get("status") == "insufficient_data":
                     st.warning(last_result["message"])
 

@@ -47,7 +47,8 @@ class SimulatedTrade:
 
 
 class TradeSimulator:
-    def __init__(self):
+    def __init__(self, strategy_config=None):
+        self._cfg = strategy_config
         TRADES_FILE.parent.mkdir(exist_ok=True)
         self._trades  = self._load_trades()
         self._weights = self._load_weights()
@@ -108,7 +109,11 @@ class TradeSimulator:
         confidence = signal.get("confidence", 0)
         direction  = signal.get("direction", "NEUTRAL")
 
-        if confidence < 0.65 or direction == "NEUTRAL":
+        min_conf = (
+            self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_normal", 0.65)
+            if self._cfg else 0.65
+        )
+        if confidence < min_conf or direction == "NEUTRAL":
             return None
 
         ts = signal.get("trade_setup") or {}
@@ -116,10 +121,14 @@ class TradeSimulator:
             return None
 
         # Bias filter — no trades against the prevailing bias
-        bias     = ctx.get("bias") or {}
-        bias_dir = bias.get("direction", "NEUTRAL")
+        bias      = ctx.get("bias") or {}
+        bias_dir  = bias.get("direction", "NEUTRAL")
         bias_prob = bias.get("probability", 50)
-        if bias_dir != "NEUTRAL" and bias_prob >= 65:
+        min_bias  = (
+            self._cfg.get("BIAS_PARAMETER", "min_bias_probability", 0.65) * 100
+            if self._cfg else 65
+        )
+        if bias_dir != "NEUTRAL" and bias_prob >= min_bias:
             if direction != bias_dir:
                 return None
 
@@ -192,7 +201,11 @@ class TradeSimulator:
                 elif current_price <= tp1:
                     exit_reason, exit_price = "WIN_TP1",  tp1
 
-            if duration > 240 and exit_reason is None:
+            timeout_min = (
+                self._cfg.get("KERNREGELN", "trade_timeout_minutes", 240)
+                if self._cfg else 240
+            )
+            if duration > timeout_min and exit_reason is None:
                 exit_reason, exit_price = "TIMEOUT", current_price
 
             if exit_reason:

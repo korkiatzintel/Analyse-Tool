@@ -7,6 +7,14 @@ class LimitOrderEngine:
 
     TICK_SIZE = 0.25
 
+    def __init__(self, strategy_config=None):
+        self._cfg = strategy_config
+
+    def _p(self, section: str, key: str, default):
+        if self._cfg:
+            return self._cfg.get(section, key, default)
+        return default
+
     def calculate_limit_levels(self, ctx: dict, bias: dict) -> list:
         """
         Berechne 1-3 vorausschauende Limit-Order-Level.
@@ -22,6 +30,13 @@ class LimitOrderEngine:
         atr          = ctx.get("atr", 10) or 10
         bias_dir     = bias.get("direction", "NEUTRAL")
 
+        vwap_offset   = self._p("LIMIT_ORDER_PARAMETER", "vwap_entry_offset",          0.50)
+        ema_offset    = self._p("LIMIT_ORDER_PARAMETER", "ema_entry_offset",            0.25)
+        min_dist_atr  = self._p("LIMIT_ORDER_PARAMETER", "min_distance_to_trigger_atr", 0.30)
+        validity_min  = self._p("LIMIT_ORDER_PARAMETER", "order_validity_minutes",       30)
+        fvg_min_size  = self._p("FILTER_PARAMETER",      "fvg_min_size_points",         2.0)
+        fvg_min_qual  = self._p("LIMIT_ORDER_PARAMETER", "fvg_min_quality_score",       0.70)
+
         if bias_dir == "NEUTRAL" or price <= 0:
             return []
 
@@ -30,8 +45,8 @@ class LimitOrderEngine:
         # ── LEVEL 1: VWAP Retest ─────────────────────────────────────────────
         if vwap > 0:
             distance_to_vwap = abs(price - vwap)
-            if bias_dir == "LONG" and price > vwap and distance_to_vwap > atr * 0.3:
-                limit_price = self._round_tick(vwap + 0.5)
+            if bias_dir == "LONG" and price > vwap and distance_to_vwap > atr * min_dist_atr:
+                limit_price = self._round_tick(vwap + vwap_offset)
                 candidates.append({
                     "type":          "VWAP_PULLBACK",
                     "direction":     "LONG",
@@ -41,8 +56,8 @@ class LimitOrderEngine:
                     "distance_pts":  round(price - limit_price, 2),
                     "requires_move": round(price - limit_price, 2),
                 })
-            elif bias_dir == "SHORT" and price < vwap and distance_to_vwap > atr * 0.3:
-                limit_price = self._round_tick(vwap - 0.5)
+            elif bias_dir == "SHORT" and price < vwap and distance_to_vwap > atr * min_dist_atr:
+                limit_price = self._round_tick(vwap - vwap_offset)
                 candidates.append({
                     "type":          "VWAP_RALLY",
                     "direction":     "SHORT",
@@ -54,26 +69,27 @@ class LimitOrderEngine:
                 })
 
         # ── LEVEL 2: EMA21 Retest auf 5m ─────────────────────────────────────
+        ema_min_dist = self._p("FILTER_PARAMETER", "ema_min_distance_atr", 0.20)
         if len(bars_5m) >= 21:
             df5   = pd.DataFrame(bars_5m[-50:])
             ema21 = self._round_tick(df5["close"].ewm(span=21).mean().iloc[-1])
             dist  = abs(price - ema21)
 
-            if bias_dir == "LONG" and price > ema21 and dist > atr * 0.2:
+            if bias_dir == "LONG" and price > ema21 and dist > atr * ema_min_dist:
                 candidates.append({
                     "type":          "EMA21_RETEST",
                     "direction":     "LONG",
-                    "limit_price":   self._round_tick(ema21 + 0.25),
+                    "limit_price":   self._round_tick(ema21 + ema_offset),
                     "trigger":       f"Retest EMA21 auf 5m ({ema21:.2f})",
                     "quality":       0.70,
                     "distance_pts":  round(price - ema21, 2),
                     "requires_move": round(price - ema21, 2),
                 })
-            elif bias_dir == "SHORT" and price < ema21 and dist > atr * 0.2:
+            elif bias_dir == "SHORT" and price < ema21 and dist > atr * ema_min_dist:
                 candidates.append({
                     "type":          "EMA21_RETEST",
                     "direction":     "SHORT",
-                    "limit_price":   self._round_tick(ema21 - 0.25),
+                    "limit_price":   self._round_tick(ema21 - ema_offset),
                     "trigger":       f"Retest EMA21 auf 5m ({ema21:.2f})",
                     "quality":       0.70,
                     "distance_pts":  round(ema21 - price, 2),
@@ -81,7 +97,7 @@ class LimitOrderEngine:
                 })
 
         # ── LEVEL 3: Fair Value Gap Retest ────────────────────────────────────
-        for fvg in self._find_fvg_levels(bars_5m, bias_dir)[:2]:
+        for fvg in self._find_fvg_levels(bars_5m, bias_dir, fvg_min_size, fvg_min_qual)[:2]:
             fvg["distance_pts"]  = round(abs(price - fvg["limit_price"]), 2)
             fvg["requires_move"] = fvg["distance_pts"]
             candidates.append(fvg)
@@ -111,7 +127,7 @@ class LimitOrderEngine:
             })
 
         # Berechne SL/TP und füge Metadaten hinzu
-        valid_until = (datetime.utcnow() + timedelta(minutes=30)).strftime("%H:%M UTC")
+        valid_until = (datetime.utcnow() + timedelta(minutes=validity_min)).strftime("%H:%M UTC")
         for c in candidates:
             c.update(self._calculate_sl_tp(c, atr))
             c["valid_until"] = valid_until
@@ -120,7 +136,10 @@ class LimitOrderEngine:
         candidates.sort(key=lambda x: x["quality"], reverse=True)
         return candidates[:3]
 
-    def _find_fvg_levels(self, bars_5m: list, bias_dir: str) -> list:
+    def _find_fvg_levels(
+        self, bars_5m: list, bias_dir: str,
+        fvg_min_size: float = 2.0, fvg_min_qual: float = 0.70
+    ) -> list:
         """Finde offene Fair Value Gaps als Entry Levels."""
         if len(bars_5m) < 3:
             return []
@@ -135,20 +154,20 @@ class LimitOrderEngine:
             if bias_dir == "LONG":
                 gap_low  = prev.get("high", 0)
                 gap_high = nxt.get("low", 0)
-                if gap_high > gap_low and (gap_high - gap_low) >= 2.0:
+                if gap_high > gap_low and (gap_high - gap_low) >= fvg_min_size:
                     fvgs.append({
                         "type":        "FVG_BULLISH",
                         "direction":   "LONG",
                         "limit_price": self._round_tick(gap_low + 0.25),
                         "trigger":     f"Bullish FVG Retest ({gap_low:.2f}–{gap_high:.2f})",
-                        "quality":     0.78,
+                        "quality":     max(fvg_min_qual, 0.78),
                         "gap_low":     gap_low,
                         "gap_high":    gap_high,
                     })
             elif bias_dir == "SHORT":
                 gap_low  = nxt.get("high", 0)
                 gap_high = prev.get("low", 0)
-                if gap_high > gap_low and (gap_high - gap_low) >= 2.0:
+                if gap_high > gap_low and (gap_high - gap_low) >= fvg_min_size:
                     fvgs.append({
                         "type":        "FVG_BEARISH",
                         "direction":   "SHORT",
@@ -164,16 +183,20 @@ class LimitOrderEngine:
     def _calculate_sl_tp(self, candidate: dict, atr: float) -> dict:
         entry     = candidate["limit_price"]
         direction = candidate["direction"]
-        sl_dist   = self._round_tick(max(atr * 0.5, 2.0))
+        sl_mult   = self._p("RISK_MANAGEMENT", "sl_atr_multiplier", 0.5)
+        sl_min    = self._p("RISK_MANAGEMENT", "sl_min_points",     2.0)
+        tp1_mult  = self._p("RISK_MANAGEMENT", "tp1_rr_multiplier", 1.5)
+        tp2_mult  = self._p("RISK_MANAGEMENT", "tp2_rr_multiplier", 2.5)
+        sl_dist   = self._round_tick(max(atr * sl_mult, sl_min))
 
         if direction == "LONG":
             stop_loss  = entry - sl_dist
-            tp1        = entry + sl_dist * 1.5
-            tp2        = entry + sl_dist * 2.5
+            tp1        = entry + sl_dist * tp1_mult
+            tp2        = entry + sl_dist * tp2_mult
         else:
             stop_loss  = entry + sl_dist
-            tp1        = entry - sl_dist * 1.5
-            tp2        = entry - sl_dist * 2.5
+            tp1        = entry - sl_dist * tp1_mult
+            tp2        = entry - sl_dist * tp2_mult
 
         sl_ticks  = int(sl_dist / self.TICK_SIZE)
         tp1_ticks = int(abs(tp1 - entry) / self.TICK_SIZE)

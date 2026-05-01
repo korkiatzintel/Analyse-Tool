@@ -1,0 +1,122 @@
+{
+  "_version": 1,
+  "_last_updated": null,
+  "_update_count": 0,
+  "_total_trades_at_update": 0,
+  "KERNREGELN": {
+    "_beschreibung": "Diese Parameter definieren die Grundstrategie - werden NIE geändert",
+    "tick_size": 0.25,
+    "tick_value_nq": 5.0,
+    "tick_value_mnq": 0.5,
+    "min_rr_ratio": 1.5,
+    "max_open_trades": 1,
+    "trade_timeout_minutes": 240
+  },
+  "SIGNAL_GEWICHTUNGEN": {
+    "_beschreibung": "Einfluss jedes Signals auf den Gesamt-Score",
+    "_range": [
+      0.3,
+      2.0
+    ],
+    "_max_change_per_update": 0.25,
+    "MULTI_TF_BIAS": 1.0,
+    "FAIR_VALUE_GAP": 1.0,
+    "VIX_REGIME": 1.0,
+    "OVERNIGHT_GAP": 1.0,
+    "EMA_TREND": 1.0,
+    "VWAP_POSITION": 1.0,
+    "RSI_EXTREME": 1.0,
+    "MEAN_REVERSION": 1.0,
+    "SESSION_LEVELS": 1.0
+  },
+  "KONFIDENZ_SCHWELLEN": {
+    "_beschreibung": "Ab wann ein Signal als Trade gilt",
+    "_range": [
+      0.55,
+      0.85
+    ],
+    "_max_change_per_update": 0.05,
+    "min_confidence_normal": 0.65,
+    "min_confidence_vix_high": 0.72,
+    "min_confidence_vix_extreme": 0.8,
+    "min_confidence_rth_open": 0.6,
+    "min_confidence_rth_close": 0.7,
+    "min_signals_required": 2
+  },
+  "BIAS_PARAMETER": {
+    "_beschreibung": "Wie stark der Markt-Bias sein muss",
+    "_range": [
+      0.55,
+      0.85
+    ],
+    "_max_change_per_update": 0.05,
+    "min_bias_probability": 0.65,
+    "vwap_weight": 2.0,
+    "ema15m_weight": 3.0,
+    "ema5m_weight": 2.0,
+    "session_position_weight": 1.5,
+    "momentum_weight": 1.0
+  },
+  "RISK_MANAGEMENT": {
+    "_beschreibung": "Stop Loss und Take Profit Berechnung",
+    "_range_atr_mult": [
+      0.3,
+      1.0
+    ],
+    "_max_change_per_update": 0.05,
+    "sl_atr_multiplier": 0.5,
+    "sl_min_points": 2.0,
+    "tp1_rr_multiplier": 1.5,
+    "tp2_rr_multiplier": 2.5,
+    "atr_period": 14
+  },
+  "VIX_REGIME_GRENZEN": {
+    "_beschreibung": "VIX-Schwellen für Marktregime-Klassifizierung",
+    "_range": [
+      10,
+      50
+    ],
+    "_max_change_per_update": 2.0,
+    "vix_low_threshold": 15.0,
+    "vix_normal_threshold": 25.0,
+    "vix_high_threshold": 30.0,
+    "vix_penalty_high": 0.8,
+    "vix_penalty_extreme": 0.5
+  },
+  "KONTEXT_MODIFIKATOREN": {
+    "_beschreibung": "Bonus/Malus für Tageszeit und Marktkontext",
+    "_range": [
+      0.5,
+      1.5
+    ],
+    "_max_change_per_update": 0.1,
+    "rth_open_bonus": 1.2,
+    "rth_mid_factor": 1.0,
+    "rth_close_penalty": 0.9,
+    "premarket_penalty": 0.7,
+    "high_vix_size_reduction": 0.5
+  },
+  "FILTER_PARAMETER": {
+    "_beschreibung": "Wann werden Trades blockiert",
+    "calendar_block_minutes": 30,
+    "calendar_wait_after_minutes": 10,
+    "overnight_gap_min_percent": 0.3,
+    "overnight_gap_max_hours": 1.5,
+    "fvg_min_size_points": 2.0,
+    "vwap_min_distance_atr": 0.3,
+    "ema_min_distance_atr": 0.2
+  },
+  "LIMIT_ORDER_PARAMETER": {
+    "_beschreibung": "Vorausschauende Limit-Order Berechnung",
+    "_range": [
+      0.1,
+      1.5
+    ],
+    "_max_change_per_update": 0.1,
+    "vwap_entry_offset": 0.5,
+    "ema_entry_offset": 0.25,
+    "min_distance_to_trigger_atr": 0.3,
+    "order_validity_minutes": 30,
+    "fvg_min_quality_score": 0.7
+  }
+}

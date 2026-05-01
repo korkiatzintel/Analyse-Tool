@@ -163,12 +163,16 @@ class SignalEngine:
         CALENDAR_FILTER: 0.0,
     }
 
-    def __init__(self) -> None:
+    def __init__(self, strategy_config=None) -> None:
         self._of_analyzer   = OrderFlowAnalyzer()
         self._ta_analyzer   = TechnicalAnalyzer()
         self._free_analyzer = FreeMarketAnalyzer()
         self.trade_setup    = TradeSetup()
-        self.threshold      = _MIN_CONFIDENCE
+        self._cfg           = strategy_config
+        self.threshold      = (
+            strategy_config.get("KONFIDENZ_SCHWELLEN", "min_confidence_normal", _MIN_CONFIDENCE)
+            if strategy_config else _MIN_CONFIDENCE
+        )
         self._learned_weights: Dict[str, float] = {}
         self._weights_mtime: float = 0.0
         self._reload_weights()
@@ -600,6 +604,22 @@ class SignalEngine:
         """
         self._reload_weights()
 
+        # Dynamic threshold from config (VIX-aware)
+        vix_regime = ctx.get("vix_regime", "normal")
+        if self._cfg:
+            if vix_regime in ("extreme", "EXTREME"):
+                self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_vix_extreme", 0.80)
+            elif vix_regime in ("high", "HIGH"):
+                self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_vix_high", 0.72)
+            else:
+                time_of_day = ctx.get("time_of_day", "RTH_MID")
+                if time_of_day == "RTH_OPEN":
+                    self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_rth_open", 0.60)
+                elif time_of_day == "RTH_CLOSE":
+                    self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_rth_close", 0.70)
+                else:
+                    self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_normal", 0.65)
+
         price  = ctx.get("last_price", 0) or 0
         atr    = compute_atr(ctx.get("bars_5m", [])) or _FALLBACK_ATR
         vwap   = ctx.get("session_vwap") or None
@@ -699,16 +719,37 @@ class SignalEngine:
 
     def _get_all_signals(self, ctx: dict) -> List[dict]:
         """Return all non-blocking signals as dicts, VIX dampening + learned weights applied."""
+        vix_high_thresh = (
+            self._cfg.get("VIX_REGIME_GRENZEN", "vix_normal_threshold", _VIX_HIGH)
+            if self._cfg else _VIX_HIGH
+        )
+        vix_penalty = (
+            self._cfg.get("VIX_REGIME_GRENZEN", "vix_penalty_high", 0.80)
+            if self._cfg else 0.80
+        )
         free_signals = self._free_analyzer.analyze(ctx)
-        if ctx.get("vix", 0.0) > _VIX_HIGH:
-            free_signals = _dampen_confidence(free_signals, factor=0.80)
+        if ctx.get("vix", 0.0) > vix_high_thresh:
+            free_signals = _dampen_confidence(free_signals, factor=vix_penalty)
         ta_signals = self._ta_analyzer.analyze(_free_snap_to_data_snap(ctx))
         signals = [
             _signal_to_dict(s)
             for s in (free_signals + ta_signals)
             if not s.metadata.get("block")
         ]
+        signals = self._apply_strategy_weights(signals)
         return self._apply_learned_weights(signals, ctx)
+
+    def _apply_strategy_weights(self, signals: List[dict]) -> List[dict]:
+        """Apply strategy_config signal weights if available."""
+        if not self._cfg:
+            return signals
+        result = []
+        for s in signals:
+            sig_type = s.get("type", "")
+            weight   = self._cfg.get("SIGNAL_GEWICHTUNGEN", sig_type, 1.0)
+            new_conf = round(min(0.99, s.get("confidence", 0.0) * weight), 3)
+            result.append({**s, "confidence": new_conf})
+        return result
 
     def _evaluate_direction(self, ctx: dict, direction: str) -> List[dict]:
         """Return all signals that agree with the given direction."""

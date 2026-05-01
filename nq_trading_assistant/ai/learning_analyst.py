@@ -54,10 +54,11 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         self._log           = logging.getLogger(__name__)
         self._analysis_file = Path(__file__).parent.parent / "logs" / "learning_analysis.json"
 
-    def run_daily_analysis(self, simulator) -> dict:
-        stats         = simulator.get_stats()
-        closed_trades = simulator.get_closed_trades(limit=100)
+    def run_daily_analysis(self, simulator, strategy_config=None) -> dict:
+        stats           = simulator.get_stats()
+        closed_trades   = simulator.get_closed_trades(limit=100)
         current_weights = simulator.get_weights()
+        self._strategy_config = strategy_config
 
         if stats["total"] < 5:
             return {
@@ -94,6 +95,18 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
 
             raw    = raw.replace("```json", "").replace("```", "").strip()
             result = json.loads(raw)
+
+            # Apply strategy parameter updates
+            param_updates = result.get("parameter_updates", {})
+            if param_updates and self._strategy_config:
+                update_report = self._strategy_config.update_from_gemini(param_updates)
+                result["update_report"] = update_report
+                accepted = len(update_report.get("accepted", []))
+                rejected = len(update_report.get("rejected", []))
+                self._log.info(
+                    "Parameter angepasst: %d übernommen, %d begrenzt/abgelehnt",
+                    accepted, rejected,
+                )
 
             analysis_record = {
                 "timestamp":        datetime.utcnow().isoformat(),
@@ -137,6 +150,12 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             return {"status": "error", "message": str(e)}
 
     def _build_analysis_prompt(self, stats: dict, trades: list, weights: dict) -> str:
+        cfg = getattr(self, "_strategy_config", None)
+        params_json = (
+            json.dumps(cfg.get_all_for_gemini(), indent=2, ensure_ascii=False)
+            if cfg else "{}"
+        )
+
         trade_details = [
             {
                 "id":            t["trade_id"],
@@ -274,6 +293,23 @@ LETZTE {len(trade_details)} TRADES (detailliert):
 {json.dumps(trade_details, indent=2, ensure_ascii=False)}
 
 ════════════════════════════════════════
+ANPASSBARE STRATEGIE-PARAMETER
+════════════════════════════════════════
+
+Du darfst folgende Parameter anpassen um die Strategie zu verbessern.
+Beachte die angegebenen Ranges und maximalen Änderungen pro Update.
+Begründe JEDE Änderung mit konkreten Daten aus den Trades.
+
+{params_json}
+
+WICHTIGE REGELN FÜR PARAMETER-ÄNDERUNGEN:
+1. Ändere nie mehr als 3-4 Parameter pro Analyse
+2. Fokussiere auf die Parameter mit dem größten Hebel
+3. Sei konservativ — lieber kleine sichere Schritte
+4. Begründe jeden Schritt mit den Trade-Daten
+5. KERNREGELN dürfen NICHT geändert werden
+
+════════════════════════════════════════
 DEINE ANALYSE-AUFGABE
 ════════════════════════════════════════
 
@@ -322,5 +358,21 @@ WICHTIG — Antworte NUR in diesem JSON-Format, ohne Markdown:
     "Konkrete, verständliche Empfehlung 2",
     "Konkrete, verständliche Empfehlung 3"
   ],
-  "naechste_analyse_in": "Nach weiteren X Trades oder in Y Tagen"
+  "naechste_analyse_in": "Nach weiteren X Trades oder in Y Tagen",
+  "parameter_updates": {{
+    "SIGNAL_GEWICHTUNGEN": {{
+      "FAIR_VALUE_GAP": 1.15,
+      "EMA_TREND": 0.85
+    }},
+    "KONFIDENZ_SCHWELLEN": {{
+      "min_confidence_vix_high": 0.75
+    }},
+    "RISK_MANAGEMENT": {{
+      "sl_atr_multiplier": 0.55
+    }}
+  }},
+  "parameter_begruendung": {{
+    "SIGNAL_GEWICHTUNGEN.FAIR_VALUE_GAP": "FVG hat 78% Win-Rate bei VIX < 20, sollte stärker gewichtet werden",
+    "KONFIDENZ_SCHWELLEN.min_confidence_vix_high": "Bei VIX > 25 verlieren wir zu viele Trades, höhere Schwelle nötig"
+  }}
 }}"""
