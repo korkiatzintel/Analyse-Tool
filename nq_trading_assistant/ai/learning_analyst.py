@@ -49,9 +49,8 @@ Antworte AUSSCHLIESSLICH in folgendem JSON-Format ohne Markdown oder Erklärunge
 Gewichtungen: 0.5 = stark reduzieren, 1.0 = neutral, 1.5 = stark bevorzugen.
 Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
 
-    def __init__(self, client, model: str = "claude-sonnet-4-6"):
-        self._client        = client
-        self._model         = model
+    def __init__(self, analyst_instance):
+        self._analyst       = analyst_instance
         self._log           = logging.getLogger(__name__)
         self._analysis_file = Path(__file__).parent.parent / "logs" / "learning_analysis.json"
 
@@ -70,14 +69,30 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         prompt = self._build_analysis_prompt(stats, closed_trades, current_weights)
 
         try:
-            response = self._client.messages.create(
-                model      = self._model,
-                max_tokens = 2000,
-                system     = self._SYSTEM_PROMPT,
-                messages   = [{"role": "user", "content": prompt}],
-            )
+            if hasattr(self._analyst, "_client"):
+                from google.genai import types
+                client   = self._analyst._client
+                response = client.models.generate_content(
+                    model    = "gemini-2.5-flash",
+                    contents = prompt,
+                    config   = types.GenerateContentConfig(
+                        system_instruction = self._SYSTEM_PROMPT,
+                        max_output_tokens  = 2000,
+                    ),
+                )
+                raw = response.text.strip()
+            elif hasattr(self._analyst, "_anthropic"):
+                response = self._analyst._anthropic.messages.create(
+                    model      = "claude-sonnet-4-6",
+                    max_tokens = 2000,
+                    system     = self._SYSTEM_PROMPT,
+                    messages   = [{"role": "user", "content": prompt}],
+                )
+                raw = response.content[0].text.strip()
+            else:
+                raise Exception("Kein kompatibler KI-Client verfügbar")
 
-            raw    = response.content[0].text.strip()
+            raw    = raw.replace("```json", "").replace("```", "").strip()
             result = json.loads(raw)
 
             analysis_record = {
@@ -122,50 +137,190 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             return {"status": "error", "message": str(e)}
 
     def _build_analysis_prompt(self, stats: dict, trades: list, weights: dict) -> str:
-        recent = trades[:20]
-        trade_summary = [
+        trade_details = [
             {
-                "id":           t["trade_id"],
-                "direction":    t["direction"],
-                "confidence":   f"{t['confidence']:.0%}",
-                "signals":      t["active_signals"],
-                "outcome":      t["outcome"],
-                "pnl_pts":      t.get("pnl_points", 0),
-                "duration_min": t.get("duration_minutes", 0),
-                "vix_regime":   t.get("vix_regime"),
-                "time_of_day":  t.get("time_of_day"),
-                "exit":         t.get("exit_reason"),
+                "id":            t["trade_id"],
+                "richtung":      t["direction"],
+                "konfidenz":     f"{t['confidence']:.0%}",
+                "aktive_signale": t["active_signals"],
+                "ergebnis":      t["outcome"],
+                "pnl_punkte":    t.get("pnl_points", 0),
+                "dauer_minuten": t.get("duration_minutes", 0),
+                "vix_regime":    t.get("vix_regime", "normal"),
+                "tageszeit":     t.get("time_of_day", "RTH_MID"),
+                "exit_grund":    t.get("exit_reason", ""),
+                "bias_richtung": t.get("bias_direction", ""),
+                "bias_staerke":  t.get("bias_probability", 0),
             }
-            for t in recent
+            for t in trades[:30]
         ]
 
-        return f"""Analysiere folgende NQ Futures Simulations-Daten und optimiere die Signal-Gewichtungen:
+        return f"""Du bist ein erfahrener quantitativer NQ Futures Trading-Analyst.
+Du analysierst ein automatisches Trading-System und optimierst dessen \
+Signal-Gewichtungen basierend auf realen Simulationsdaten.
+
+════════════════════════════════════════
+VOLLSTÄNDIGE STRATEGIEBESCHREIBUNG
+════════════════════════════════════════
+
+Das System handelt E-Mini Nasdaq-100 Futures (NQ) im Day-Trading.
+Tick-Größe: 0.25 Punkte = $5 pro Tick (NQ) / $0.50 (MNQ)
+
+HANDELSSYSTEM-LOGIK:
+1. Zuerst wird ein übergeordneter MARKT-BIAS berechnet (LONG/SHORT/NEUTRAL)
+   basierend auf: VWAP-Position, EMA Stack 15m/5m, Session-Position, Momentum
+
+2. Nur Trades IN Bias-Richtung werden akzeptiert
+
+3. Signal Engine bewertet 8 verschiedene Signaltypen (siehe unten)
+
+4. Trades werden nur eröffnet wenn Konfidenz >= 65% UND mindestens
+   2 Signale übereinstimmen
+
+5. Risk Management: SL = 0.5 ATR, TP1 = 1.5x Risiko, TP2 = 2.5x Risiko
+   Timeout: Trade wird nach 4 Stunden geschlossen
+
+SIGNAL-TYPEN (Beschreibung für deine Analyse):
+
+MULTI_TF_BIAS:
+- Prüft ob EMA9 > EMA21 auf BEIDEN Zeitrahmen (5min UND 15min)
+- Bullish wenn beide EMAs ausgerichtet sind + Preis über VWAP
+- Stärkster Trend-Indikator im System
+- Gewichtung aktuell: {weights.get('MULTI_TF_BIAS', 1.0):.2f}
+
+FAIR_VALUE_GAP (FVG):
+- 3-Kerzen-Muster: mittlere Kerze springt so stark dass eine
+  Preislücke entsteht (Institutioneller Footprint)
+- Signal bei Retest dieser Lücke (Preis kehrt zurück)
+- Sehr verlässlich in trendfolgenden Märkten
+- Gewichtung aktuell: {weights.get('FAIR_VALUE_GAP', 1.0):.2f}
+
+VIX_REGIME:
+- VIX < 15: Ruhiger Markt (Trend-Setups bevorzugen)
+- VIX 15-25: Normaler Markt (alle Setups)
+- VIX 25-30: Volatiler Markt (nur High-Konfidenz)
+- VIX > 30: Extremer Markt (keine Signale)
+- Gewichtung aktuell: {weights.get('VIX_REGIME', 1.0):.2f}
+
+OVERNIGHT_GAP:
+- Gap > 0.3% zwischen gestrigem Close und heutigem Open
+- Trade in Richtung Gap-Fill in ersten 90 Minuten
+- Funktioniert gut bei klaren Richtungs-Gaps
+- Gewichtung aktuell: {weights.get('OVERNIGHT_GAP', 1.0):.2f}
+
+EMA_TREND:
+- EMA9 vs EMA21 Kreuzung auf 30-Sekunden-Bars
+- Kurzfristiger Trend-Indikator
+- Bestätigt oder widerspricht dem übergeordneten Bias
+- Gewichtung aktuell: {weights.get('EMA_TREND', 1.0):.2f}
+
+VWAP_POSITION:
+- VWAP = Volume Weighted Average Price (institutioneller Fairwert)
+- Preis über VWAP = Käufer dominieren
+- Preis unter VWAP = Verkäufer dominieren
+- Abstand zum VWAP zeigt Momentum-Stärke
+- Gewichtung aktuell: {weights.get('VWAP_POSITION', 1.0):.2f}
+
+RSI_EXTREME:
+- RSI < 30 = Überverkauft (Long-Setup)
+- RSI > 70 = Überkauft (Short-Setup)
+- Kontra-Trend Signal — funktioniert besonders bei hohem VIX
+- Gewichtung aktuell: {weights.get('RSI_EXTREME', 1.0):.2f}
+
+MEAN_REVERSION:
+- Preis weit von VWAP entfernt (> 0.8 ATR)
+- Erwartung der Rückkehr zum Mittelwert
+- Funktioniert in seitwärts tendierenden Märkten gut
+- Gewichtung aktuell: {weights.get('MEAN_REVERSION', 1.0):.2f}
+
+KONTEXT-MODIFIKATOREN:
+- VIX hoch Abzug: {weights.get('_vix_high_penalty', 0.8):.2f} (Konfidenz × dieser Faktor bei VIX 25-30)
+- VIX extrem Abzug: {weights.get('_vix_extreme_penalty', 0.5):.2f} (bei VIX > 30)
+- RTH Open Bonus: {weights.get('_time_open_bonus', 1.2):.2f} (erste 30 Min mehr Gewicht)
+- RTH Close Abzug: {weights.get('_time_close_penalty', 0.9):.2f} (letzte 30 Min weniger)
+
+NQ-SPEZIFISCHES MARKTWISSEN:
+- NQ ist volatiler als ES (höherer ATR)
+- Beste Trading-Zeit: 09:30-11:00 ET und 13:30-15:00 ET
+- FOMC, CPI, NFP Tage: Vermeidung empfohlen
+- NQ reagiert stark auf Tech-Sentiment und Zinsen
+- Typische Win-Rate bei guten Setups: 60-65%
+- Profitable Systeme brauchen mindestens 1:1.5 Risk/Reward
+
+════════════════════════════════════════
+AKTUELLE PERFORMANCE-DATEN
+════════════════════════════════════════
 
 GESAMTSTATISTIK:
 - Trades gesamt: {stats['total']}
-- Win-Rate: {stats['win_rate']}%
-- Avg P&L: {stats['avg_pnl_points']} Punkte / ${stats['avg_pnl_usd']} pro Trade
-- Gesamt P&L: ${stats['total_pnl_usd']}
+- Win-Rate: {stats['win_rate']}% (Ziel: >62%)
+- Avg P&L: {stats['avg_pnl_points']:+.2f} Punkte / ${stats['avg_pnl_usd']:+.0f} pro Trade
+- Gesamt P&L: ${stats['total_pnl_usd']:+.0f}
 - Wins: {stats['wins']} | Losses: {stats['losses']} | Timeouts: {stats['timeouts']}
 
 WIN-RATE NACH SIGNAL-TYP:
-{json.dumps(stats.get('best_signal_types', {}), indent=2)}
+{json.dumps(stats.get('best_signal_types', {}), indent=2, ensure_ascii=False)}
 
 WIN-RATE NACH VIX-REGIME:
-{json.dumps(stats.get('win_rate_by_regime', {}), indent=2)}
+{json.dumps(stats.get('win_rate_by_regime', {}), indent=2, ensure_ascii=False)}
 
 WIN-RATE NACH TAGESZEIT:
-{json.dumps(stats.get('win_rate_by_time', {}), indent=2)}
+{json.dumps(stats.get('win_rate_by_time', {}), indent=2, ensure_ascii=False)}
 
-AKTUELLE GEWICHTUNGEN:
-{json.dumps({k: v for k, v in weights.items() if not k.startswith('_')}, indent=2)}
+AKTUELLE SIGNAL-GEWICHTUNGEN:
+{json.dumps({{k: v for k, v in weights.items() if not k.startswith('_')}}, indent=2)}
 
-LETZTE 20 TRADES (neueste zuerst):
-{json.dumps(trade_summary, indent=2)}
+LETZTE {len(trade_details)} TRADES (detailliert):
+{json.dumps(trade_details, indent=2, ensure_ascii=False)}
 
-AUFGABE:
-1. Identifiziere welche Signal-Kombinationen zu Wins/Losses führen
-2. Erkenne Muster (z.B. "FAIR_VALUE_GAP funktioniert nur bei normalem VIX")
-3. Empfehle neue Gewichtungen die zukünftige Win-Rate verbessern
-4. Berücksichtige: NQ hat typische Win-Rate von 60-65% bei guten Setups
-5. Sei konservativ — max ±0.3 Änderung pro Signal"""
+════════════════════════════════════════
+DEINE ANALYSE-AUFGABE
+════════════════════════════════════════
+
+Analysiere die Daten und beantworte:
+
+1. Welche Signale performen gut/schlecht und WARUM
+   (beziehe NQ-Marktlogik ein)
+
+2. Gibt es Muster? (z.B. "FVG funktioniert nur bei normalem VIX",
+   "Trades am RTH Open haben höhere Win-Rate")
+
+3. Welche Gewichtungen sollen angepasst werden?
+   Sei konservativ: max ±0.25 Änderung pro Signal pro Analyse
+   Begründe jede Änderung mit konkreten Daten aus den Trades
+
+4. Was soll der Trader konkret anders machen?
+
+WICHTIG — Antworte NUR in diesem JSON-Format, ohne Markdown:
+{{
+  "analyse": {{
+    "zusammenfassung": "2-3 verständliche Sätze für den Trader",
+    "staerken": ["Konkrete Stärke 1", "Konkrete Stärke 2"],
+    "schwaechen": ["Konkrete Schwäche 1", "Konkrete Schwäche 2"],
+    "muster": [
+      "Beispiel: FVG-Setups gewinnen zu 75% wenn VIX unter 20",
+      "Beispiel: Trades am RTH_OPEN haben 20% höhere Win-Rate"
+    ]
+  }},
+  "signal_bewertung": {{
+    "SIGNAL_NAME": {{
+      "win_rate": 65.0,
+      "empfehlung": "STAERKEN",
+      "begruendung": "Konkrete Begründung mit Bezug auf die Trade-Daten"
+    }}
+  }},
+  "neue_gewichtungen": {{
+    "MULTI_TF_BIAS": 1.15,
+    "FAIR_VALUE_GAP": 0.90
+  }},
+  "kontext_anpassungen": {{
+    "_vix_high_penalty": 0.75,
+    "_time_open_bonus": 1.25
+  }},
+  "handlungsempfehlungen": [
+    "Konkrete, verständliche Empfehlung 1",
+    "Konkrete, verständliche Empfehlung 2",
+    "Konkrete, verständliche Empfehlung 3"
+  ],
+  "naechste_analyse_in": "Nach weiteren X Trades oder in Y Tagen"
+}}"""
