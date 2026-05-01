@@ -38,8 +38,10 @@ _LOG_DIR.mkdir(exist_ok=True)
 _LOG_FILE     = _LOG_DIR / "app.log"
 _STATE_FILE    = _LOG_DIR / "ui_state.json"    # read by dashboard.py
 _COMMAND_FILE  = _LOG_DIR / "ui_command.json"  # written by dashboard.py "force" button
-_LEARNING_TRIGGER = _LOG_DIR / "run_learning.trigger"
-_LEARNING_RESULT  = _LOG_DIR / "last_learning_result.json"
+_LEARNING_TRIGGER   = _LOG_DIR / "run_learning.trigger"
+_LEARNING_RESULT    = _LOG_DIR / "last_learning_result.json"
+_LEARNING_START_TS  = _LOG_DIR / "learning_start.timestamp"
+_LEARNING_RUNNING   = _LOG_DIR / "learning_running.flag"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -170,12 +172,20 @@ def _get_learning_analyst() -> LearningAnalyst:
 
 
 def run_learning_analysis() -> dict:
-    analyst = _get_learning_analyst()
-    result  = analyst.run_daily_analysis(_APP.simulator)
-    _LEARNING_RESULT.write_text(
-        json.dumps(result, indent=2, default=str),
-        encoding="utf-8",
-    )
+    _LEARNING_START_TS.write_text(str(time.time()))
+    _LEARNING_RUNNING.write_text("1")
+    try:
+        analyst = _get_learning_analyst()
+        # Capture weights before analysis so dashboard can show deltas
+        previous_weights = _APP.simulator.get_weights().copy()
+        result = analyst.run_daily_analysis(_APP.simulator)
+        result["previous_weights"] = previous_weights
+        _LEARNING_RESULT.write_text(
+            json.dumps(result, indent=2, default=str),
+            encoding="utf-8",
+        )
+    finally:
+        _LEARNING_RUNNING.unlink(missing_ok=True)
     return result
 
 # ---------------------------------------------------------------------------

@@ -989,53 +989,145 @@ def main() -> None:
     # TAB 3 — KI Lernen
     # ══════════════════════════════════════════════════════════════════════
 
+    _LEARNING_RUNNING_FLAG = Path(__file__).parent.parent / "logs" / "learning_running.flag"
+    _LEARNING_START_TS     = Path(__file__).parent.parent / "logs" / "learning_start.timestamp"
+
+    _NAMEN_MAP = {
+        "MULTI_TF_BIAS":    "Trend-Richtungsanalyse (Multi-Timeframe)",
+        "FAIR_VALUE_GAP":   "Preislücken-Strategie (Fair Value Gap)",
+        "VIX_REGIME":       "Markt-Volatilität Filter",
+        "OVERNIGHT_GAP":    "Overnight-Lücken Strategie",
+        "CALENDAR_FILTER":  "Wirtschaftskalender Filter",
+        "EMA_TREND":        "Gleitender Durchschnitt Trend",
+        "VWAP_POSITION":    "Tagesdurchschnittspreis (VWAP)",
+        "RSI_EXTREME":      "Überkauft/Überverkauft Erkennung",
+        "MEAN_REVERSION":   "Rückkehr zum Mittelwert",
+        "SESSION_LEVELS":   "Tages-Hochs und Tiefs",
+    }
+
     with tab3:
         st.subheader("🧠 Tägliche KI-Lernanalyse")
 
-        try:
-            last_result = json.loads(
-                _LEARNING_RESULT.read_text(encoding="utf-8")
-            )
-            if last_result.get("status") == "success":
-                result_data = last_result["result"]
-                stats_snap  = last_result["stats"]
+        # ── Ladeanimation wenn Analyse läuft ──────────────────────────────
+        trigger_running = (
+            _LEARNING_TRIGGER.exists() or _LEARNING_RUNNING_FLAG.exists()
+        )
+        if trigger_running:
+            st.info("🧠 KI analysiert gerade deine Trades...")
+            progress_bar = st.progress(0.0)
+            status_text  = st.empty()
+            steps = [
+                "📊 Lade Trade-Historie...",
+                "🔍 Analysiere Gewinner-Trades...",
+                "❌ Analysiere Verlierer-Trades...",
+                "🧩 Erkenne Muster...",
+                "⚖️ Berechne neue Gewichtungen...",
+                "✅ Schreibe Empfehlungen...",
+            ]
+            try:
+                elapsed  = time.time() - float(_LEARNING_START_TS.read_text())
+                step_idx = min(int(elapsed / 5), len(steps) - 1)
+                progress = min(elapsed / 30, 0.95)
+                status_text.markdown(f"**{steps[step_idx]}**")
+                progress_bar.progress(progress)
+            except Exception:
+                progress_bar.progress(0.1)
+                status_text.markdown(f"**{steps[0]}**")
+            time.sleep(2)
+            st.rerun()
 
-                st.success(f"✅ Letzte Analyse: {stats_snap['total']} Trades analysiert")
+        # ── Ergebnis-Anzeige ─────────────────────────────────────────────
+        else:
+            try:
+                last_result = json.loads(
+                    _LEARNING_RESULT.read_text(encoding="utf-8")
+                )
 
-                analyse = result_data.get("analyse", {})
-                st.markdown(f"**Zusammenfassung:** {analyse.get('zusammenfassung', '')}")
+                if last_result.get("status") == "success":
+                    result_data       = last_result["result"]
+                    stats_snap        = last_result["stats"]
+                    analyse           = result_data.get("analyse", {})
+                    signal_bewertung  = result_data.get("signal_bewertung", {})
+                    neue_gewichtungen = result_data.get("neue_gewichtungen", {})
+                    alte_gewichtungen = last_result.get("previous_weights", {})
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**💪 Stärken:**")
-                    for s in analyse.get("staerken", []):
-                        st.markdown(f"• {s}")
-                with col2:
-                    st.markdown("**⚠️ Schwächen:**")
-                    for s in analyse.get("schwaechen", []):
-                        st.markdown(f"• {s}")
+                    st.success(
+                        f"✅ Analyse abgeschlossen — {stats_snap['total']} Trades ausgewertet"
+                    )
+                    st.caption(
+                        f"Win-Rate: {stats_snap['win_rate']}% | "
+                        f"Gesamt P&L: ${stats_snap['total_pnl_usd']:+.0f}"
+                    )
+                    st.divider()
 
-                st.markdown("**🔍 Erkannte Muster:**")
-                for m in analyse.get("muster", []):
-                    st.markdown(f"• {m}")
+                    # Zusammenfassung
+                    st.markdown("### 📋 Was hat die KI herausgefunden?")
+                    st.markdown(f"> {analyse.get('zusammenfassung', '')}")
+                    st.divider()
 
-                st.markdown("**✅ Handlungsempfehlungen:**")
-                for r in result_data.get("handlungsempfehlungen", []):
-                    st.markdown(f"• {r}")
+                    # Strategien — Herzstück
+                    st.markdown("### 🔧 Welche Strategien wurden angepasst?")
+                    for sig_name, bewertung in signal_bewertung.items():
+                        empfehlung  = bewertung.get("empfehlung", "BEIBEHALTEN")
+                        begruendung = bewertung.get("begruendung", "")
+                        win_rate    = bewertung.get("win_rate", 0)
+                        alte_gew    = float(alte_gewichtungen.get(sig_name, 1.0))
+                        neue_gew    = float(neue_gewichtungen.get(sig_name, 1.0))
+                        delta       = neue_gew - alte_gew
+                        anzeige     = _NAMEN_MAP.get(sig_name, sig_name)
 
-                st.subheader("📊 Aktuelle Signal-Gewichtungen")
-                weights = state.get("signal_weights", {})
-                for k, v in weights.items():
-                    if not k.startswith("_") and isinstance(v, (int, float)):
-                        col_a, col_b = st.columns([3, 1])
-                        col_a.markdown(f"**{k}**")
-                        col_b.metric("Gewicht", f"{v:.2f}", delta=f"{v - 1.0:+.2f}")
+                        col_icon, col_info, col_change = st.columns([1, 5, 2])
+                        with col_icon:
+                            if empfehlung == "STAERKEN":
+                                st.markdown("### 📈")
+                            elif empfehlung == "REDUZIEREN":
+                                st.markdown("### 📉")
+                            else:
+                                st.markdown("### ➡️")
+                        with col_info:
+                            if empfehlung == "STAERKEN":
+                                st.success(f"**{anzeige}** — wird stärker gewichtet")
+                            elif empfehlung == "REDUZIEREN":
+                                st.error(f"**{anzeige}** — wird weniger gewichtet")
+                            else:
+                                st.info(f"**{anzeige}** — bleibt unverändert")
+                            st.caption(f"💬 {begruendung}")
+                            st.caption(f"📊 Win-Rate dieser Strategie: {win_rate:.0f}%")
+                        with col_change:
+                            st.metric(
+                                "Stellschraube", f"{neue_gew:.2f}",
+                                delta=f"{delta:+.2f}" if abs(delta) > 0.01 else "±0",
+                                delta_color="normal",
+                            )
+                            if abs(delta) > 0.01:
+                                st.caption("⬆️ mehr Einfluss" if delta > 0
+                                           else "⬇️ weniger Einfluss")
+                        st.divider()
 
-            elif last_result.get("status") == "insufficient_data":
-                st.warning(last_result["message"])
+                    # Erkannte Muster
+                    muster = analyse.get("muster", [])
+                    if muster:
+                        st.markdown("### 🔍 Erkannte Handelsmuster")
+                        for m in muster:
+                            st.markdown(f"• {m}")
+                        st.divider()
 
-        except Exception:
-            st.info("Noch keine Lernanalyse durchgeführt.")
+                    # Handlungsempfehlungen
+                    st.markdown("### ✅ Was solltest du als Trader beachten?")
+                    for i, emp in enumerate(result_data.get("handlungsempfehlungen", []), 1):
+                        st.markdown(f"**{i}.** {emp}")
+
+                    naechste = result_data.get("naechste_analyse_in", "")
+                    if naechste:
+                        st.info(f"📅 Empfehlung für nächste Analyse: {naechste}")
+
+                elif last_result.get("status") == "insufficient_data":
+                    st.warning(last_result["message"])
+
+            except FileNotFoundError:
+                st.info("Noch keine Lernanalyse durchgeführt.")
+            except Exception:
+                st.info("Noch keine Lernanalyse durchgeführt.")
 
         st.divider()
         sim_stats    = state.get("sim_stats", {})
