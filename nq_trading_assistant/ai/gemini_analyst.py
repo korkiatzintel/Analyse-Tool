@@ -142,7 +142,7 @@ class GeminiAnalyst:
         Fällt auf gemini-2.0-flash-lite zurück wenn Quota erreicht.
         """
         return self._call_gemini(
-            prompt, self._SYSTEM_LEARNING, max_tokens=2000
+            prompt, self._SYSTEM_LEARNING, max_tokens=8000
         )
 
     # ── Helpers ────────────────────────────────────────────────────────────

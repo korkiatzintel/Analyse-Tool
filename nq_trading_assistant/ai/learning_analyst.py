@@ -84,8 +84,33 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             else:
                 raise Exception("Kein kompatibler KI-Client verfügbar")
 
-            raw    = raw.replace("```json", "").replace("```", "").strip()
-            result = json.loads(raw)
+            raw = raw.strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
+
+            # Truncate to last complete JSON object if response was cut off
+            if not raw.endswith("}"):
+                last_brace = raw.rfind("}")
+                if last_brace > 0:
+                    raw = raw[:last_brace + 1]
+
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError as e:
+                self._log.error("JSON Parse Error: %s", e)
+                self._log.error("Raw response (first 500): %s", raw[:500])
+                result = {
+                    "analyse": {
+                        "zusammenfassung": "JSON-Parse Fehler — bitte erneut versuchen",
+                        "staerken":   [],
+                        "schwaechen": ["Antwort war unvollständig"],
+                        "muster":     [],
+                    },
+                    "signal_bewertung":    {},
+                    "neue_gewichtungen":   {},
+                    "kontext_anpassungen": {},
+                    "handlungsempfehlungen": ["Lernanalyse erneut starten"],
+                    "naechste_analyse_in":   "Sofort erneut versuchen",
+                }
 
             # Apply strategy parameter updates
             param_updates = result.get("parameter_updates", {})
@@ -133,9 +158,6 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
 
             return {"status": "success", "result": result, "stats": stats}
 
-        except json.JSONDecodeError as e:
-            self._log.error("Claude Response Parse Error: %s", e)
-            return {"status": "error", "message": f"JSON Parse Fehler: {e}"}
         except Exception as e:
             self._log.error("Learning Analysis Fehler: %s", e)
             return {"status": "error", "message": str(e)}
