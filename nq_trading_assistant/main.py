@@ -313,6 +313,7 @@ def _write_ui_state() -> None:
                 "1m":  free.get("bars_1m",  [])[-100:],
                 "5m":  free.get("bars_5m",  [])[-100:],
                 "15m": free.get("bars_15m", [])[-100:],
+                "1h":  free.get("bars_1h",  [])[-50:],
             },
             "market": {
                 "last_price":      last_price,

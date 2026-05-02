@@ -924,10 +924,17 @@ def main() -> None:
                     st.metric("ICT Confluence Score", f"{ict_score:.0%}")
                     st.progress(ict_score)
                 with col_ict2:
-                    ms = ict.get("market_structure", {})
-                    if ms:
+                    htf = ict.get("htf_bias", {})
+                    ms  = ict.get("market_structure", {})
+                    if htf:
                         st.metric(
-                            "Market Structure",
+                            "HTF Bias (1h)",
+                            htf.get("type", "?"),
+                            delta=htf.get("direction", ""),
+                        )
+                    elif ms:
+                        st.metric(
+                            "Market Structure (15m)",
                             ms.get("type", "?"),
                             delta=ms.get("direction", ""),
                         )

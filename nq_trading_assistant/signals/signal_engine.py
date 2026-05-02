@@ -739,10 +739,11 @@ class SignalEngine:
                         f"({bias_direction} {bias_prob:.0f}%)"
                     )
 
-        # ICT analysis — FVG / Order Blocks / Market Structure / Killzones
+        # ICT analysis — FVG / Order Blocks / Market Structure / Killzones / HTF Bias
         ict_signals = self._ict.analyze(
             ctx.get("bars_5m",  []),
             ctx.get("bars_15m", []),
+            ctx.get("bars_1h",  []),
         )
         ict_score       = ict_signals.get("ict_score", 0.0)
         killzone_bonus  = ict_signals.get("killzone_bonus", 1.0)

@@ -25,9 +25,10 @@ class ICTSignalEngine:
                 return name
         return None
 
-    def analyze(self, bars_5m: list, bars_15m: list) -> dict:
+    def analyze(self, bars_5m: list, bars_15m: list, bars_1h: list | None = None) -> dict:
         """
         Berechne ICT Signale aus OHLCV Daten.
+        bars_1h wird für HTF Bias (Higher Timeframe) genutzt.
         Gibt immer ein dict zurück — Fehler einzelner Indikatoren
         unterbrechen die anderen nicht.
         """
@@ -42,11 +43,12 @@ class ICTSignalEngine:
             }
 
         df5  = self._to_df(bars_5m[-100:])
-        df15 = self._to_df(bars_15m[-50:]) if len(bars_15m) >= 10 else None
+        df15 = self._to_df(bars_15m[-50:]) if len(bars_15m or []) >= 10 else None
+        df1h = self._to_df(bars_1h[-200:]) if len(bars_1h or []) >= 20 else None
 
         signals: dict = {}
 
-        # ── 1. Fair Value Gaps ────────────────────────────────────────────
+        # ── 1. Fair Value Gaps (5m) ───────────────────────────────────────
         try:
             fvg_5m = smc.fvg(df5, join_consecutive=True)
             if fvg_5m is not None and not fvg_5m.empty:
@@ -55,7 +57,7 @@ class ICTSignalEngine:
         except Exception as e:
             signals["fvg_error"] = str(e)
 
-        # ── 2. Order Blocks ───────────────────────────────────────────────
+        # ── 2. Order Blocks (5m) ──────────────────────────────────────────
         try:
             swing_hl = smc.swing_highs_lows(df5, swing_length=10)
             ob = smc.ob(df5, swing_hl)
@@ -86,7 +88,37 @@ class ICTSignalEngine:
             except Exception as e:
                 signals["bos_error"] = str(e)
 
-        # ── 4. Liquidity Levels ───────────────────────────────────────────
+        # ── 4. HTF Bias (1h) — BOS/CHoCH + FVG auf Stunden-Chart ─────────
+        if df1h is not None:
+            try:
+                swing_hl_1h = smc.swing_highs_lows(df1h, swing_length=10)
+                bos_1h = smc.bos_choch(df1h, swing_hl_1h)
+                if bos_1h is not None and not bos_1h.empty:
+                    recent_1h = bos_1h[bos_1h["BOS"].notna() | bos_1h["CHOCH"].notna()].tail(3)
+                    if not recent_1h.empty:
+                        last_1h = recent_1h.iloc[-1]
+                        is_bos_1h   = pd.notna(last_1h.get("BOS"))
+                        is_choch_1h = pd.notna(last_1h.get("CHOCH"))
+                        if is_bos_1h or is_choch_1h:
+                            val_1h = last_1h.get("BOS", last_1h.get("CHOCH", 0))
+                            signals["htf_bias"] = {
+                                "type":      "BOS" if is_bos_1h else "CHOCH",
+                                "direction": "BULLISH" if (val_1h or 0) > 0 else "BEARISH",
+                                "level":     float(last_1h.get("Level", 0) or 0),
+                                "timeframe": "1h",
+                            }
+            except Exception as e:
+                signals["htf_bias_error"] = str(e)
+
+            try:
+                fvg_1h = smc.fvg(df1h, join_consecutive=True)
+                if fvg_1h is not None and not fvg_1h.empty:
+                    recent_fvg_1h = fvg_1h[fvg_1h["FVG"].notna()].tail(3)
+                    signals["fvg_1h"] = recent_fvg_1h.to_dict("records")
+            except Exception as e:
+                signals["fvg_1h_error"] = str(e)
+
+        # ── 5. Liquidity Levels (5m) ──────────────────────────────────────
         try:
             swing_hl_5 = smc.swing_highs_lows(df5, swing_length=5)
             liq = smc.liquidity(df5, swing_hl_5)
@@ -96,12 +128,12 @@ class ICTSignalEngine:
         except Exception as e:
             signals["liq_error"] = str(e)
 
-        # ── 5. Killzone ───────────────────────────────────────────────────
+        # ── 6. Killzone ───────────────────────────────────────────────────
         killzone = self.get_active_killzone()
         signals["active_killzone"] = killzone
         signals["killzone_bonus"]  = 1.3 if killzone else 1.0
 
-        # ── 6. ICT Score ──────────────────────────────────────────────────
+        # ── 7. ICT Score ──────────────────────────────────────────────────
         score   = 0.0
         reasons = []
 
@@ -117,15 +149,27 @@ class ICTSignalEngine:
             score += 0.20
             reasons.append(f"✅ BOS {ms.get('direction')} erkannt (+20%)")
 
+        htf = signals.get("htf_bias", {})
+        if htf:
+            score += 0.20
+            reasons.append(
+                f"✅ HTF 1h Bias: {htf.get('type')} {htf.get('direction')} (+20%)"
+            )
+
         obs = signals.get("order_blocks", [])
         if obs:
-            score += 0.20
-            reasons.append(f"✅ {len(obs)} Order Block(s) aktiv (+20%)")
+            score += 0.15
+            reasons.append(f"✅ {len(obs)} Order Block(s) aktiv (+15%)")
 
         fvgs = signals.get("fvg_levels", [])
         if fvgs:
-            score += 0.15
-            reasons.append(f"✅ {len(fvgs)} FVG(s) erkannt (+15%)")
+            score += 0.10
+            reasons.append(f"✅ {len(fvgs)} FVG(s) 5m erkannt (+10%)")
+
+        fvgs_1h = signals.get("fvg_1h", [])
+        if fvgs_1h:
+            score += 0.10
+            reasons.append(f"✅ {len(fvgs_1h)} FVG(s) 1h erkannt (+10%)")
 
         signals["ict_score"]   = min(score, 1.0)
         signals["ict_reasons"] = reasons
