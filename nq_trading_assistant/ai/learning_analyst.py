@@ -339,6 +339,12 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         weights_json       = json.dumps(weights_clean, indent=2)
         n_trades           = len(trade_details)
 
+        # ICT stats
+        ict_killzone_json = json.dumps(stats.get("win_rate_by_killzone",         {}), indent=2, ensure_ascii=False)
+        ict_ms_json       = json.dumps(stats.get("win_rate_by_market_structure", {}), indent=2, ensure_ascii=False)
+        ict_score_json    = json.dumps(stats.get("win_rate_by_ict_score",        {}), indent=2, ensure_ascii=False)
+        ict_ob_json       = json.dumps(stats.get("win_rate_by_order_blocks",     {}), indent=2, ensure_ascii=False)
+
         w_multi    = weights.get("MULTI_TF_BIAS",        1.0)
         w_fvg      = weights.get("FAIR_VALUE_GAP",       1.0)
         w_vix      = weights.get("VIX_REGIME",           1.0)
@@ -473,6 +479,28 @@ WIN-RATE NACH VIX-REGIME:
 WIN-RATE NACH TAGESZEIT:
 {stats_time_json}
 
+════════════════════════════════════════
+ICT PERFORMANCE ANALYSE
+════════════════════════════════════════
+
+WIN-RATE IN KILLZONE vs. AUSSERHALB:
+{ict_killzone_json}
+→ Idealerweise sollte IN_KILLZONE deutlich höher sein als OUTSIDE_KILLZONE.
+  Wenn nicht: Killzone-Filter muss verstärkt werden.
+
+WIN-RATE NACH MARKET STRUCTURE BEIM ENTRY:
+{ict_ms_json}
+→ CHoCH Entries sollten höhere Win-Rate haben als BOS oder kein Signal.
+
+WIN-RATE NACH ICT CONFLUENCE SCORE:
+{ict_score_json}
+→ Höherer ICT Score sollte mit höherer Win-Rate korrelieren.
+  Wenn nicht: ICT Gewichtung überdenken.
+
+WIN-RATE MIT vs. OHNE ORDER BLOCKS:
+{ict_ob_json}
+→ Trades mit aktivem Order Block sollten besser performen.
+
 AKTUELLE SIGNAL-GEWICHTUNGEN:
 {weights_json}
 
@@ -513,6 +541,12 @@ Analysiere die Daten und beantworte:
    Begründe jede Änderung mit konkreten Daten aus den Trades
 
 4. Was soll der Trader konkret anders machen?
+
+5. ICT-SPEZIFISCHE FRAGEN (beantworte alle vier):
+   a) Lohnt sich der Killzone-Filter? (Win-Rate Differenz > 10%?)
+   b) Welche Market Structure hat die höchste Win-Rate?
+   c) Korreliert ICT Score mit Win-Rate?
+   d) Sind Order Blocks ein verlässlicher Zusatzfilter?
 
 WICHTIG — Antworte NUR in diesem JSON-Format, ohne Markdown:
 {{
@@ -561,5 +595,11 @@ WICHTIG — Antworte NUR in diesem JSON-Format, ohne Markdown:
   "parameter_begruendung": {{
     "SIGNAL_GEWICHTUNGEN.FAIR_VALUE_GAP": "FVG hat 78% Win-Rate bei VIX < 20, sollte stärker gewichtet werden",
     "KONFIDENZ_SCHWELLEN.min_confidence_vix_high": "Bei VIX > 25 verlieren wir zu viele Trades, höhere Schwelle nötig"
+  }},
+  "ict_empfehlungen": {{
+    "killzone_filter_staerken": true,
+    "beste_market_structure": "CHOCH_BULLISH",
+    "ict_score_schwelle_empfehlung": 0.3,
+    "order_block_pflicht": false
   }}
 }}"""

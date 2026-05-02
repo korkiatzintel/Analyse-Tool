@@ -44,6 +44,14 @@ class SimulatedTrade:
     max_favorable_excursion: Optional[float] = None
     bias_direction:          str             = "NEUTRAL"
     bias_probability:        float           = 50.0
+    # ICT context at entry
+    killzone:                Optional[str]   = None
+    ict_score:               Optional[float] = None
+    order_blocks_active:     Optional[int]   = None
+    market_structure:        Optional[str]   = None
+    liquidity_levels:        Optional[int]   = None
+    bias_1h:                 Optional[str]   = None
+    fvg_count:               Optional[int]   = None
 
 
 class TradeSimulator:
@@ -173,6 +181,12 @@ class TradeSimulator:
         if len(open_trades) >= 1:
             return None
 
+        ict = ctx.get("ict_signals", {})
+        ms  = ict.get("market_structure", {})
+        ms_str = (
+            f"{ms.get('type','?')}_{ms.get('direction','?')}" if ms else None
+        )
+
         trade = SimulatedTrade(
             trade_id        = str(uuid.uuid4())[:8],
             timestamp_entry = datetime.utcnow().isoformat(),
@@ -193,6 +207,15 @@ class TradeSimulator:
             time_of_day     = self._get_time_of_day(),
             bias_direction  = bias_dir,
             bias_probability = bias_prob,
+            killzone         = ict.get("active_killzone"),
+            ict_score        = ict.get("ict_score", 0),
+            order_blocks_active = len(ict.get("order_blocks", [])),
+            market_structure = ms_str,
+            liquidity_levels = len(ict.get("liquidity_levels", [])),
+            fvg_count        = len(ict.get("fvg_levels", [])),
+            bias_1h          = (ctx.get("ict_signals", {})
+                                .get("htf_bias", {})
+                                .get("direction", "NEUTRAL")),
         )
 
         self._trades.append(asdict(trade))
@@ -295,10 +318,14 @@ class TradeSimulator:
             "avg_pnl_points":   round(sum(t["pnl_points"] for t in closed) / len(closed), 2),
             "avg_pnl_usd":      round(sum(t["pnl_usd_nq"] for t in closed) / len(closed), 2),
             "total_pnl_usd":    round(sum(t["pnl_usd_nq"] for t in closed), 2),
-            "best_signal_types":  self._best_signals(closed),
-            "worst_signal_types": self._worst_signals(closed),
-            "win_rate_by_regime": self._stats_by_regime(closed),
-            "win_rate_by_time":   self._stats_by_time(closed),
+            "best_signal_types":         self._best_signals(closed),
+            "worst_signal_types":        self._worst_signals(closed),
+            "win_rate_by_regime":        self._stats_by_regime(closed),
+            "win_rate_by_time":          self._stats_by_time(closed),
+            "win_rate_by_killzone":      self._stats_by_killzone(closed),
+            "win_rate_by_market_structure": self._stats_by_market_structure(closed),
+            "win_rate_by_ict_score":     self._stats_by_ict_score(closed),
+            "win_rate_by_order_blocks":  self._stats_by_order_blocks(closed),
         }
 
     def _best_signals(self, trades: list) -> dict:
@@ -344,6 +371,75 @@ class TradeSimulator:
                 times[tod]["wins"] += 1
         return {tod: round(s["wins"] / s["total"] * 100, 1)
                 for tod, s in times.items() if s["total"] > 0}
+
+    def _stats_by_killzone(self, trades: list) -> dict:
+        kz: dict = {
+            "IN_KILLZONE":      {"wins": 0, "total": 0},
+            "OUTSIDE_KILLZONE": {"wins": 0, "total": 0},
+        }
+        for t in trades:
+            key = "IN_KILLZONE" if t.get("killzone") else "OUTSIDE_KILLZONE"
+            kz[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                kz[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in kz.items() if v["total"] > 0
+        }
+
+    def _stats_by_market_structure(self, trades: list) -> dict:
+        ms: dict = {}
+        for t in trades:
+            key = t.get("market_structure") or "NONE"
+            if key not in ms:
+                ms[key] = {"wins": 0, "total": 0}
+            ms[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                ms[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in ms.items() if v["total"] > 0
+        }
+
+    def _stats_by_ict_score(self, trades: list) -> dict:
+        ranges: dict = {
+            "HIGH (>0.6)":      {"wins": 0, "total": 0},
+            "MEDIUM (0.3-0.6)": {"wins": 0, "total": 0},
+            "LOW (<0.3)":       {"wins": 0, "total": 0},
+            "NO_ICT":           {"wins": 0, "total": 0},
+        }
+        for t in trades:
+            score = t.get("ict_score") or 0
+            if score == 0:
+                key = "NO_ICT"
+            elif score >= 0.6:
+                key = "HIGH (>0.6)"
+            elif score >= 0.3:
+                key = "MEDIUM (0.3-0.6)"
+            else:
+                key = "LOW (<0.3)"
+            ranges[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                ranges[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in ranges.items() if v["total"] > 0
+        }
+
+    def _stats_by_order_blocks(self, trades: list) -> dict:
+        ob: dict = {
+            "MIT_OB":  {"wins": 0, "total": 0},
+            "OHNE_OB": {"wins": 0, "total": 0},
+        }
+        for t in trades:
+            key = "MIT_OB" if (t.get("order_blocks_active") or 0) > 0 else "OHNE_OB"
+            ob[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                ob[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in ob.items() if v["total"] > 0
+        }
 
     def apply_weights(self, weights_update: dict):
         self._weights.update(weights_update)

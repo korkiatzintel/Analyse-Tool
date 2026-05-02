@@ -1048,6 +1048,20 @@ def main() -> None:
                         )
                     st.caption(f"Signale: {', '.join(t.get('active_signals', []))}")
 
+            # Killzone Performance
+            kz_stats = sim_stats.get("win_rate_by_killzone", {})
+            if kz_stats:
+                st.subheader("🎯 Killzone Performance")
+                col_kz1, col_kz2 = st.columns(2)
+                kz_in  = kz_stats.get("IN_KILLZONE", 0)
+                kz_out = kz_stats.get("OUTSIDE_KILLZONE", 0)
+                col_kz1.metric(
+                    "In Killzone",
+                    f"{kz_in:.1f}%",
+                    delta=f"{kz_in - kz_out:+.1f}% vs. außerhalb",
+                )
+                col_kz2.metric("Außerhalb Killzone", f"{kz_out:.1f}%")
+
             # Win-Rate nach Signal-Typ
             best_signals = sim_stats.get("best_signal_types", {})
             if best_signals:
@@ -1195,6 +1209,28 @@ def main() -> None:
                     naechste = result_data.get("naechste_analyse_in", "")
                     if naechste:
                         st.info(f"📅 Empfehlung für nächste Analyse: {naechste}")
+
+                    # ICT-spezifische Erkenntnisse
+                    ict_emp = result_data.get("ict_empfehlungen", {})
+                    if ict_emp:
+                        st.divider()
+                        st.markdown("### 🎯 ICT-spezifische Erkenntnisse")
+
+                        if ict_emp.get("killzone_filter_staerken"):
+                            st.success("✅ Killzone-Filter bestätigt — Trades außerhalb deutlich schlechter")
+                        else:
+                            st.info("ℹ️ Killzone-Filter zeigt noch keinen klaren Vorteil")
+
+                        beste_ms = ict_emp.get("beste_market_structure", "")
+                        if beste_ms:
+                            st.info(f"📊 Beste Market Structure: **{beste_ms}**")
+
+                        schwelle = ict_emp.get("ict_score_schwelle_empfehlung", 0)
+                        if schwelle:
+                            st.caption(f"🎯 Empfohlene ICT Score-Schwelle: {schwelle:.2f}")
+
+                        if ict_emp.get("order_block_pflicht"):
+                            st.warning("⚠️ Order Blocks stark empfohlen — ohne OB deutlich schlechtere Win-Rate")
 
                     # Parameter-Änderungen
                     update_report     = result_data.get("update_report", {})
