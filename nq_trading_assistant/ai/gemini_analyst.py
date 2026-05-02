@@ -36,7 +36,7 @@ class GeminiAnalyst:
         self._client          = genai.Client(api_key=api_key)
         self._log             = logging.getLogger(__name__)
         self._last_call       = 0.0
-        self._min_interval    = 60   # Sekunden zwischen Live-Calls
+        self._min_interval    = 120  # Sekunden zwischen Live-Calls
         self.total_calls      = 0
         self.estimated_cost_usd = 0.0
 
