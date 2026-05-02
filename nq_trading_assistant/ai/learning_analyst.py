@@ -56,122 +56,163 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
 
     def run_daily_analysis(self, simulator, strategy_config=None) -> dict:
         stats           = simulator.get_stats()
-        closed_trades   = simulator.get_closed_trades(limit=15)   # FIX 1: max 15 trades
+        closed_trades   = simulator.get_closed_trades(limit=15)
         current_weights = simulator.get_weights()
         self._strategy_config = strategy_config
 
         if stats["total"] < 5:
             return {
-                "status":       "insufficient_data",
-                "message":      f"Zu wenige Trades ({stats['total']}). Mindestens 5 benötigt.",
-                "min_required": 5,
+                "status":  "insufficient_data",
+                "message": f"Zu wenige Trades ({stats['total']}). Mindestens 5 benötigt.",
             }
 
+        # Compact trade lines: one per row to minimise token count
+        trade_summary = [
+            f"{t['direction']} {t.get('confidence', 0):.0%} "
+            f"→ {t.get('outcome', '?')} "
+            f"({', '.join(t.get('active_signals', [])[:2])})"
+            for t in closed_trades[:15]
+        ]
+
+        weights_simple = {
+            k: v for k, v in current_weights.items()
+            if not k.startswith("_") and isinstance(v, (int, float))
+        }
+
+        # ── CALL 1: Diagnose (text, max 400 tokens) ───────────────────────
+        prompt_1 = (
+            f"NQ Futures Trading System Analyse.\n\n"
+            f"Stats: {stats['total']} Trades, Win-Rate {stats['win_rate']}%\n"
+            f"Win nach Zeit: {stats.get('win_rate_by_time', {})}\n"
+            f"Win nach VIX: {stats.get('win_rate_by_regime', {})}\n"
+            f"Beste Signale: {stats.get('best_signal_types', {})}\n\n"
+            f"Letzte 15 Trades (Richtung/Konfidenz/Ergebnis/Signale):\n"
+            + "\n".join(trade_summary)
+            + "\n\nSchreibe 3 kurze Stichpunkte was verbessert werden muss. Auf Deutsch."
+        )
+        diagnose = self._call_analyst(prompt_1, max_tokens=400)
+
+        # ── CALL 2: Gewichtungen (JSON-only, max 300 tokens) ──────────────
+        weights_list = "\n".join(f"- {k}: {v:.2f}" for k, v in weights_simple.items())
+        best_signals = stats.get("best_signal_types", {})
+        worst_3      = dict(sorted(best_signals.items(), key=lambda x: x[1])[:3])
+
+        prompt_2 = (
+            f"Basierend auf: Win-Rate {stats['win_rate']}%, "
+            f"beste Signale: {best_signals}, "
+            f"schlechteste: {worst_3}, "
+            f"Diagnose: {diagnose[:300]}\n\n"
+            f"Aktuelle Gewichtungen:\n{weights_list}\n\n"
+            "Gib NUR ein JSON-Objekt zurück (kein Text davor/danach):\n"
+            '{"MULTI_TF_BIAS": 1.0, "FAIR_VALUE_GAP": 1.0, "VIX_REGIME": 1.0, '
+            '"OVERNIGHT_GAP": 1.0, "EMA_TREND": 1.0, "VWAP_POSITION": 1.0, '
+            '"RSI_EXTREME": 1.0, "MEAN_REVERSION": 1.0, "SESSION_LEVELS": 1.0}\n\n'
+            "Ändere nur Werte die laut den Daten angepasst werden müssen. "
+            "Range: 0.5–1.5. Max Änderung: 0.25 pro Signal."
+        )
+        weights_raw = self._call_analyst(prompt_2, max_tokens=300)
+
+        # ── CALL 3: Handlungsempfehlungen (text, max 300 tokens) ──────────
+        prompt_3 = (
+            f"NQ Trading System, Win-Rate {stats['win_rate']}%.\n"
+            f"Diagnose: {diagnose[:200]}\n\n"
+            "Gib genau 3 konkrete Handlungsempfehlungen auf Deutsch.\n"
+            "Format: Nummerierte Liste, je max 1 Satz."
+        )
+        empfehlungen_raw = self._call_analyst(prompt_3, max_tokens=300)
+
+        # ── Parse Gewichtungen ────────────────────────────────────────────
+        neue_gewichtungen: dict = {}
         try:
-            # ── CALL 1: Diagnose (kurzer Text, 500 tokens) ─────────────────
-            diagnose = self._run_diagnose(stats, closed_trades)
+            w = weights_raw.strip().replace("```json", "").replace("```", "").strip()
+            start = w.find("{")
+            end   = w.rfind("}") + 1
+            if start >= 0 and end > start:
+                w = w[start:end]
+            neue_gewichtungen = json.loads(w)
+        except Exception as e:
+            self._log.error("Gewichtungen Parse Error: %s | raw: %s", e, weights_raw[:200])
 
-            # ── CALL 2: Parameter-Updates (reines JSON, 3000 tokens) ───────
-            weights_clean = {k: v for k, v in current_weights.items() if not k.startswith("_")}
-            weights_json  = json.dumps(weights_clean, indent=2)
-            signals_json  = json.dumps(stats.get("best_signal_types", {}), indent=2)
-            time_json     = json.dumps(stats.get("win_rate_by_time",   {}), indent=2)
-            regime_json   = json.dumps(stats.get("win_rate_by_regime", {}), indent=2)
+        # ── Parse Empfehlungen ────────────────────────────────────────────
+        empfehlungen = []
+        for line in empfehlungen_raw.strip().splitlines():
+            clean = line.strip().lstrip("0123456789.-) ").strip()
+            if clean:
+                empfehlungen.append(clean)
 
-            prompt_params = self._build_params_prompt(
-                diagnose, stats, weights_json, signals_json, time_json, regime_json
-            )
-
-            if hasattr(self._analyst, "run_daily_analysis"):
-                raw = self._analyst.run_daily_analysis(prompt_params, max_tokens=3000)
-            elif hasattr(self._analyst, "_anthropic"):
-                response = self._analyst._anthropic.messages.create(
-                    model      = "claude-sonnet-4-6",
-                    max_tokens = 3000,
-                    system     = self._SYSTEM_PROMPT,
-                    messages   = [{"role": "user", "content": prompt_params}],
-                )
-                raw = response.content[0].text.strip()
-            else:
-                raise Exception("Kein kompatibler KI-Client verfügbar")
-
-            raw = raw.strip()
-            raw = raw.replace("```json", "").replace("```", "").strip()
-
-            # Truncate to last complete JSON object if response was cut off
-            if not raw.endswith("}"):
-                last_brace = raw.rfind("}")
-                if last_brace > 0:
-                    raw = raw[:last_brace + 1]
-
-            try:
-                result = json.loads(raw)
-            except json.JSONDecodeError as e:
-                self._log.error("JSON Parse Error: %s", e)
-                self._log.error("Raw response (first 500): %s", raw[:500])
-                result = {
-                    "analyse": {
-                        "zusammenfassung": "JSON-Parse Fehler — bitte erneut versuchen",
-                        "staerken":   [],
-                        "schwaechen": ["Antwort war unvollständig"],
-                        "muster":     [],
-                    },
-                    "signal_bewertung":    {},
-                    "neue_gewichtungen":   {},
-                    "kontext_anpassungen": {},
-                    "handlungsempfehlungen": ["Lernanalyse erneut starten"],
-                    "naechste_analyse_in":   "Sofort erneut versuchen",
-                }
-
-            # Apply strategy parameter updates
-            param_updates = result.get("parameter_updates", {})
-            if param_updates and self._strategy_config:
-                update_report = self._strategy_config.update_from_gemini(param_updates)
-                result["update_report"] = update_report
-                accepted = len(update_report.get("accepted", []))
-                rejected = len(update_report.get("rejected", []))
-                self._log.info(
-                    "Parameter angepasst: %d übernommen, %d begrenzt/abgelehnt",
-                    accepted, rejected,
-                )
-
-            analysis_record = {
-                "timestamp":        datetime.utcnow().isoformat(),
-                "stats_snapshot":   stats,
-                "result":           result,
-                "trades_analyzed":  stats["total"],
+        # ── Signal-Bewertung aus Stats ────────────────────────────────────
+        signal_bewertung: dict = {}
+        for sig, wr in best_signals.items():
+            signal_bewertung[sig] = {
+                "win_rate":    wr,
+                "empfehlung":  "STAERKEN" if wr >= 60 else ("REDUZIEREN" if wr <= 40 else "BEIBEHALTEN"),
+                "begruendung": f"Win-Rate {wr}% basierend auf {stats['total']} Trades",
             }
 
-            history: list = []
-            try:
-                history = json.loads(
-                    self._analysis_file.read_text(encoding="utf-8")
-                )
-            except Exception:
-                pass
-            history.append(analysis_record)
-            self._analysis_file.write_text(
-                json.dumps(history[-10:], indent=2),
-                encoding="utf-8",
-            )
+        # ── Baue finales Result ───────────────────────────────────────────
+        result = {
+            "analyse": {
+                "zusammenfassung": diagnose[:500],
+                "staerken":        [],
+                "schwaechen":      [],
+                "muster":          [],
+            },
+            "signal_bewertung":      signal_bewertung,
+            "neue_gewichtungen":     neue_gewichtungen,
+            "kontext_anpassungen":   {},
+            "handlungsempfehlungen": empfehlungen[:3],
+            "naechste_analyse_in":   "Nach 20–30 weiteren Trades",
+        }
 
-            new_weights     = result.get("neue_gewichtungen", {})
-            context_weights = result.get("kontext_anpassungen", {})
-            new_weights.update(context_weights)
-            new_weights["_total_trades_analyzed"] = stats["total"]
-            simulator.apply_weights(new_weights)
-
+        # ── Wende Gewichtungen an ─────────────────────────────────────────
+        if neue_gewichtungen:
+            simulator.apply_weights(neue_gewichtungen)
             self._log.info(
-                "Learning Analysis abgeschlossen: %d Trades, Win-Rate %.1f%%, "
-                "%d Gewichtungen aktualisiert",
-                stats["total"], stats["win_rate"], len(new_weights),
+                "Gewichtungen aktualisiert: %d Signale angepasst",
+                len(neue_gewichtungen),
             )
 
-            return {"status": "success", "result": result, "stats": stats}
+        # ── Speichere Analyse ─────────────────────────────────────────────
+        analysis_record = {
+            "timestamp":       datetime.utcnow().isoformat(),
+            "stats_snapshot":  stats,
+            "result":          result,
+            "trades_analyzed": stats["total"],
+            "previous_weights": weights_simple,
+        }
 
-        except Exception as e:
-            self._log.error("Learning Analysis Fehler: %s", e)
-            return {"status": "error", "message": str(e)}
+        history: list = []
+        try:
+            history = json.loads(self._analysis_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        history.append(analysis_record)
+        self._analysis_file.write_text(
+            json.dumps(history[-10:], indent=2, default=str),
+            encoding="utf-8",
+        )
+
+        self._log.info(
+            "Learning Analysis fertig: %d Trades, Win-Rate %s%%, "
+            "%d Gewichtungen aktualisiert",
+            stats["total"], stats["win_rate"], len(neue_gewichtungen),
+        )
+
+        return {"status": "success", "result": result, "stats": stats}
+
+    def _call_analyst(self, prompt: str, max_tokens: int) -> str:
+        """Route to the available KI provider."""
+        if hasattr(self._analyst, "run_daily_analysis"):
+            return self._analyst.run_daily_analysis(prompt, max_tokens=max_tokens)
+        if hasattr(self._analyst, "_anthropic"):
+            resp = self._analyst._anthropic.messages.create(
+                model      = "claude-sonnet-4-6",
+                max_tokens = max_tokens,
+                system     = "Du bist ein NQ Futures Trading-Analyst. Antworte auf Deutsch.",
+                messages   = [{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+        raise Exception("Kein kompatibler KI-Client verfügbar")
 
     def _run_diagnose(self, stats: dict, trades: list) -> str:
         """Call 1: short German text diagnosis, max 500 tokens."""
