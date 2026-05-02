@@ -62,6 +62,8 @@ _RISK_REWARD_T1      = 1.5    # Target 1 = 1.5 × risk
 _RISK_REWARD_T2      = 2.5    # Target 2 = 2.5 × risk
 _FALLBACK_ATR        = 8.0    # NQ points — used when ATR unavailable
 _LIQUIDITY_CLUSTER_N = 5      # top N price levels for cluster entry zone
+_MIN_TP1_TICKS       = 80     # minimum TP1 ticks (80 × 0.25 = 20 pts = $400 NQ)
+_MIN_TP1_POINTS      = _MIN_TP1_TICKS * 0.25
 
 
 class TradeSetup:
@@ -97,11 +99,34 @@ class TradeSetup:
             take_profit_1 = round(entry - sl_distance * 1.5, 2)
             take_profit_2 = round(entry - sl_distance * 2.5, 2)
 
+        tp1_ticks = round(abs(take_profit_1 - entry) / tick)
+
+        # Ensure TP1 >= minimum ticks; expand SL symmetrically if needed
+        tp_adjusted = False
+        if tp1_ticks < _MIN_TP1_TICKS:
+            min_sl = round(round(max(_MIN_TP1_POINTS / _RISK_REWARD_T1,
+                                     atr * 0.5) / tick) * tick, 2)
+            sl_distance = min_sl
+            if direction == "LONG":
+                stop_loss     = round(entry - sl_distance, 2)
+                take_profit_1 = round(entry + sl_distance * _RISK_REWARD_T1, 2)
+                take_profit_2 = round(entry + sl_distance * _RISK_REWARD_T2, 2)
+            else:
+                stop_loss     = round(entry + sl_distance, 2)
+                take_profit_1 = round(entry - sl_distance * _RISK_REWARD_T1, 2)
+                take_profit_2 = round(entry - sl_distance * _RISK_REWARD_T2, 2)
+            tp1_ticks   = round(abs(take_profit_1 - entry) / tick)
+            tp_adjusted = True
+
+        # Reject setup if TP1 still below minimum (ATR too small)
+        if tp1_ticks < _MIN_TP1_TICKS:
+            return None
+
         sl_ticks  = round(sl_distance  / tick)
         tp1_ticks = round(abs(take_profit_1 - entry) / tick)
         tp2_ticks = round(abs(take_profit_2 - entry) / tick)
 
-        return {
+        setup = {
             "direction":             direction,
             "entry_price":           entry,
 
@@ -121,10 +146,17 @@ class TradeSetup:
             "take_profit_2_usd_nq":  round(tp2_ticks * self.NQ_TICK_VALUE,  2),
             "take_profit_2_usd_mnq": round(tp2_ticks * self.MNQ_TICK_VALUE, 2),
 
-            "risk_reward_tp1":       1.5,
-            "risk_reward_tp2":       2.5,
+            "risk_reward_tp1":       _RISK_REWARD_T1,
+            "risk_reward_tp2":       _RISK_REWARD_T2,
             "atr_used":              round(atr, 2),
+            "meets_min_ticks":       True,
         }
+        if tp_adjusted:
+            setup["tp_adjusted"] = True
+            setup["tp_adjustment_reason"] = (
+                f"TP1 war unter {_MIN_TP1_TICKS} Ticks — auf Minimum angepasst"
+            )
+        return setup
 
 
 @dataclass

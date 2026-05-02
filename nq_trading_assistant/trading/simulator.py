@@ -120,6 +120,42 @@ class TradeSimulator:
         if not ts:
             return None
 
+        # Minimum TP1 filter
+        tp1_ticks = ts.get("take_profit_1_ticks", 0)
+        min_tp1   = (
+            self._cfg.get("RISK_MANAGEMENT", "min_tp1_ticks", 80)
+            if self._cfg else 80
+        )
+        if tp1_ticks < min_tp1:
+            import logging
+            logging.getLogger(__name__).debug(
+                "Trade abgelehnt: TP1 nur %d Ticks (Minimum: %d Ticks = %d Punkte)",
+                tp1_ticks, min_tp1, min_tp1 // 4,
+            )
+            return None
+
+        # Confidence boost for large TP setups
+        bonus_t1 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_1", 120)
+            if self._cfg else 120
+        )
+        bonus_t2 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_2", 200)
+            if self._cfg else 200
+        )
+        factor_1 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_1", 1.05)
+            if self._cfg else 1.05
+        )
+        factor_2 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_2", 1.10)
+            if self._cfg else 1.10
+        )
+        if tp1_ticks >= bonus_t2:
+            confidence = min(0.95, confidence * factor_2)
+        elif tp1_ticks >= bonus_t1:
+            confidence = min(0.95, confidence * factor_1)
+
         # Bias filter — no trades against the prevailing bias
         bias      = ctx.get("bias") or {}
         bias_dir  = bias.get("direction", "NEUTRAL")

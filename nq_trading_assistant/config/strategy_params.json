@@ -68,7 +68,13 @@
     "sl_min_points": 2.0,
     "tp1_rr_multiplier": 1.5,
     "tp2_rr_multiplier": 2.5,
-    "atr_period": 14
+    "atr_period": 14,
+    "min_tp1_ticks": 80,
+    "min_tp1_points": 20.0,
+    "tp_bonus_threshold_1": 120,
+    "tp_bonus_threshold_2": 200,
+    "tp_bonus_factor_1": 1.05,
+    "tp_bonus_factor_2": 1.10
   },
   "VIX_REGIME_GRENZEN": {
     "_beschreibung": "VIX-Schwellen für Marktregime-Klassifizierung",

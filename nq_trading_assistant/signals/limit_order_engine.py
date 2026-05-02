@@ -180,6 +180,9 @@ class LimitOrderEngine:
 
         return fvgs[-2:] if fvgs else []
 
+    _MIN_TP1_TICKS  = 80
+    _MIN_TP1_POINTS = 20.0
+
     def _calculate_sl_tp(self, candidate: dict, atr: float) -> dict:
         entry     = candidate["limit_price"]
         direction = candidate["direction"]
@@ -189,6 +192,9 @@ class LimitOrderEngine:
         tp2_mult  = self._p("RISK_MANAGEMENT", "tp2_rr_multiplier", 2.5)
         sl_dist   = self._round_tick(max(atr * sl_mult, sl_min))
 
+        min_tp1   = self._p("RISK_MANAGEMENT", "min_tp1_ticks",  self._MIN_TP1_TICKS)
+        min_pts   = self._p("RISK_MANAGEMENT", "min_tp1_points", self._MIN_TP1_POINTS)
+
         if direction == "LONG":
             stop_loss  = entry - sl_dist
             tp1        = entry + sl_dist * tp1_mult
@@ -197,6 +203,24 @@ class LimitOrderEngine:
             stop_loss  = entry + sl_dist
             tp1        = entry - sl_dist * tp1_mult
             tp2        = entry - sl_dist * tp2_mult
+
+        tp1_ticks = int(abs(tp1 - entry) / self.TICK_SIZE)
+
+        tp_adjusted = False
+        if tp1_ticks < min_tp1:
+            # Expand SL so that TP1 = SL × tp1_mult ≥ min_pts
+            required_sl = self._round_tick(max(min_pts / tp1_mult, sl_dist))
+            if required_sl > sl_dist:
+                sl_dist = required_sl
+                if direction == "LONG":
+                    stop_loss = entry - sl_dist
+                    tp1       = entry + sl_dist * tp1_mult
+                    tp2       = entry + sl_dist * tp2_mult
+                else:
+                    stop_loss = entry + sl_dist
+                    tp1       = entry - sl_dist * tp1_mult
+                    tp2       = entry - sl_dist * tp2_mult
+                tp_adjusted = True
 
         sl_ticks  = int(sl_dist / self.TICK_SIZE)
         tp1_ticks = int(abs(tp1 - entry) / self.TICK_SIZE)
@@ -211,6 +235,8 @@ class LimitOrderEngine:
             "take_profit_1_usd_nq":   tp1_ticks * 5,
             "risk_reward":            1.5,
             "atr_used":               round(atr, 2),
+            "tp_adjusted":            tp_adjusted,
+            "meets_min_ticks":        tp1_ticks >= min_tp1,
         }
 
     def _round_tick(self, price: float) -> float:

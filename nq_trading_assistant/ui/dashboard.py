@@ -536,11 +536,22 @@ def _col_signals(state: dict) -> None:
                     f"{ts.get('stop_loss_price', 0):.2f} "
                     f"({ts.get('stop_loss_ticks', 0)} Ticks)",
                 )
+                tp1_ticks = ts.get("take_profit_1_ticks", 0)
+                if tp1_ticks >= 200:
+                    tp_badge = "🚀"
+                elif tp1_ticks >= 120:
+                    tp_badge = "✅"
+                elif tp1_ticks >= 80:
+                    tp_badge = "✅"
+                else:
+                    tp_badge = "⚠️"
                 c3.metric(
                     "TP1",
                     f"{ts.get('take_profit_1_price', 0):.2f} "
-                    f"({ts.get('take_profit_1_ticks', 0)} Ticks)",
+                    f"({tp1_ticks} Ticks) {tp_badge}",
                 )
+                if ts.get("tp_adjusted"):
+                    st.caption("📐 SL erweitert — TP1 Minimum (80 Ticks) durchgesetzt")
 
             st.divider()
 
