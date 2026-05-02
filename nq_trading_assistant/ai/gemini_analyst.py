@@ -136,13 +136,13 @@ class GeminiAnalyst:
 
     # ── Daily learning analysis ────────────────────────────────────────────
 
-    def run_daily_analysis(self, prompt: str) -> str:
+    def run_daily_analysis(self, prompt: str, max_tokens: int = 3000) -> str:
         """
         Lernanalyse — nutzt primär gemini-2.5-flash (klüger).
         Fällt auf gemini-2.0-flash-lite zurück wenn Quota erreicht.
         """
         return self._call_gemini(
-            prompt, self._SYSTEM_LEARNING, max_tokens=8000
+            prompt, self._SYSTEM_LEARNING, max_tokens=max_tokens
         )
 
     # ── Helpers ────────────────────────────────────────────────────────────

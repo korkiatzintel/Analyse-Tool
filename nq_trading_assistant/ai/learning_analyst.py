@@ -56,7 +56,7 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
 
     def run_daily_analysis(self, simulator, strategy_config=None) -> dict:
         stats           = simulator.get_stats()
-        closed_trades   = simulator.get_closed_trades(limit=100)
+        closed_trades   = simulator.get_closed_trades(limit=15)   # FIX 1: max 15 trades
         current_weights = simulator.get_weights()
         self._strategy_config = strategy_config
 
@@ -67,18 +67,29 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
                 "min_required": 5,
             }
 
-        prompt = self._build_analysis_prompt(stats, closed_trades, current_weights)
-
         try:
+            # ── CALL 1: Diagnose (kurzer Text, 500 tokens) ─────────────────
+            diagnose = self._run_diagnose(stats, closed_trades)
+
+            # ── CALL 2: Parameter-Updates (reines JSON, 3000 tokens) ───────
+            weights_clean = {k: v for k, v in current_weights.items() if not k.startswith("_")}
+            weights_json  = json.dumps(weights_clean, indent=2)
+            signals_json  = json.dumps(stats.get("best_signal_types", {}), indent=2)
+            time_json     = json.dumps(stats.get("win_rate_by_time",   {}), indent=2)
+            regime_json   = json.dumps(stats.get("win_rate_by_regime", {}), indent=2)
+
+            prompt_params = self._build_params_prompt(
+                diagnose, stats, weights_json, signals_json, time_json, regime_json
+            )
+
             if hasattr(self._analyst, "run_daily_analysis"):
-                # GeminiAnalyst — nutzt automatisches Modell-Fallback
-                raw = self._analyst.run_daily_analysis(prompt)
+                raw = self._analyst.run_daily_analysis(prompt_params, max_tokens=3000)
             elif hasattr(self._analyst, "_anthropic"):
                 response = self._analyst._anthropic.messages.create(
                     model      = "claude-sonnet-4-6",
-                    max_tokens = 2000,
+                    max_tokens = 3000,
                     system     = self._SYSTEM_PROMPT,
-                    messages   = [{"role": "user", "content": prompt}],
+                    messages   = [{"role": "user", "content": prompt_params}],
                 )
                 raw = response.content[0].text.strip()
             else:
@@ -161,6 +172,82 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         except Exception as e:
             self._log.error("Learning Analysis Fehler: %s", e)
             return {"status": "error", "message": str(e)}
+
+    def _run_diagnose(self, stats: dict, trades: list) -> str:
+        """Call 1: short German text diagnosis, max 500 tokens."""
+        trade_summary = json.dumps(
+            [
+                {
+                    "richtung":  t["direction"],
+                    "ergebnis":  t["outcome"],
+                    "pnl":       t.get("pnl_points", 0),
+                    "signale":   t["active_signals"],
+                    "vix":       t.get("vix_regime", "normal"),
+                    "zeit":      t.get("time_of_day", "RTH_MID"),
+                }
+                for t in trades
+            ],
+            indent=2,
+            ensure_ascii=False,
+        )
+        prompt = (
+            f"Analysiere diese NQ Futures Trade-Daten kurz:\n\n"
+            f"Win-Rate: {stats['win_rate']}% | Trades: {stats['total']} | "
+            f"Gesamt P&L: ${stats['total_pnl_usd']:+.0f}\n\n"
+            f"Letzte {len(trades)} Trades:\n{trade_summary}\n\n"
+            f"Antworte in max 200 Wörtern auf Deutsch was gut/schlecht läuft."
+        )
+        if hasattr(self._analyst, "run_daily_analysis"):
+            return self._analyst.run_daily_analysis(prompt, max_tokens=500)
+        elif hasattr(self._analyst, "_anthropic"):
+            resp = self._analyst._anthropic.messages.create(
+                model      = "claude-sonnet-4-6",
+                max_tokens = 500,
+                system     = "Du bist ein NQ Futures Trading-Analyst. Antworte auf Deutsch.",
+                messages   = [{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+        return "Keine Diagnose verfügbar."
+
+    def _build_params_prompt(
+        self,
+        diagnose:     str,
+        stats:        dict,
+        weights_json: str,
+        signals_json: str,
+        time_json:    str,
+        regime_json:  str,
+    ) -> str:
+        """Call 2: prompt for pure JSON parameter-update response."""
+        return (
+            f"Basierend auf dieser Analyse:\n{diagnose}\n\n"
+            f"Und diesen Stats:\n"
+            f"Win-Rate: {stats['win_rate']}%\n"
+            f"Beste Signale:\n{signals_json}\n"
+            f"Win-Rate nach Zeit:\n{time_json}\n"
+            f"Win-Rate nach VIX:\n{regime_json}\n\n"
+            f"Aktuelle Gewichtungen:\n{weights_json}\n\n"
+            "Gib NUR dieses JSON zurück (kein anderer Text):\n"
+            "{\n"
+            '  "analyse": {\n'
+            '    "zusammenfassung": "...",\n'
+            '    "staerken": ["..."],\n'
+            '    "schwaechen": ["..."],\n'
+            '    "muster": ["..."]\n'
+            "  },\n"
+            '  "signal_bewertung": {\n'
+            '    "SIGNAL_NAME": {\n'
+            '      "win_rate": 0.0,\n'
+            '      "empfehlung": "STAERKEN/REDUZIEREN/BEIBEHALTEN",\n'
+            '      "begruendung": "..."\n'
+            "    }\n"
+            "  },\n"
+            '  "neue_gewichtungen": {"SIGNAL_NAME": 1.0},\n'
+            '  "kontext_anpassungen": {},\n'
+            '  "handlungsempfehlungen": ["..."],\n'
+            '  "naechste_analyse_in": "..."\n'
+            "}"
+        )
 
     def _build_analysis_prompt(self, stats: dict, trades: list, weights: dict) -> str:
         cfg = getattr(self, "_strategy_config", None)
