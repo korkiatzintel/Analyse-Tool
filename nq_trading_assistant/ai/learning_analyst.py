@@ -70,18 +70,9 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         prompt = self._build_analysis_prompt(stats, closed_trades, current_weights)
 
         try:
-            if hasattr(self._analyst, "_client"):
-                from google.genai import types
-                client   = self._analyst._client
-                response = client.models.generate_content(
-                    model    = "gemini-2.5-flash",
-                    contents = prompt,
-                    config   = types.GenerateContentConfig(
-                        system_instruction = self._SYSTEM_PROMPT,
-                        max_output_tokens  = 2000,
-                    ),
-                )
-                raw = response.text.strip()
+            if hasattr(self._analyst, "run_daily_analysis"):
+                # GeminiAnalyst — nutzt automatisches Modell-Fallback
+                raw = self._analyst.run_daily_analysis(prompt)
             elif hasattr(self._analyst, "_anthropic"):
                 response = self._analyst._anthropic.messages.create(
                     model      = "claude-sonnet-4-6",
@@ -174,6 +165,37 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             for t in trades[:30]
         ]
 
+        # Pre-compute all JSON serializations before entering the f-string
+        trade_details_json = json.dumps(trade_details, indent=2, ensure_ascii=False)
+        stats_signals_json = json.dumps(stats.get("best_signal_types", {}), indent=2, ensure_ascii=False)
+        stats_regime_json  = json.dumps(stats.get("win_rate_by_regime", {}), indent=2, ensure_ascii=False)
+        stats_time_json    = json.dumps(stats.get("win_rate_by_time",   {}), indent=2, ensure_ascii=False)
+        weights_clean      = {k: v for k, v in weights.items() if not k.startswith("_")}
+        weights_json       = json.dumps(weights_clean, indent=2)
+        n_trades           = len(trade_details)
+
+        w_multi    = weights.get("MULTI_TF_BIAS",        1.0)
+        w_fvg      = weights.get("FAIR_VALUE_GAP",       1.0)
+        w_vix      = weights.get("VIX_REGIME",           1.0)
+        w_gap      = weights.get("OVERNIGHT_GAP",        1.0)
+        w_ema      = weights.get("EMA_TREND",            1.0)
+        w_vwap     = weights.get("VWAP_POSITION",        1.0)
+        w_rsi      = weights.get("RSI_EXTREME",          1.0)
+        w_mean     = weights.get("MEAN_REVERSION",       1.0)
+        w_vhp      = weights.get("_vix_high_penalty",    0.8)
+        w_vep      = weights.get("_vix_extreme_penalty", 0.5)
+        w_tob      = weights.get("_time_open_bonus",     1.2)
+        w_tcp      = weights.get("_time_close_penalty",  0.9)
+
+        total      = stats["total"]
+        win_rate   = stats["win_rate"]
+        avg_pts    = stats["avg_pnl_points"]
+        avg_usd    = stats["avg_pnl_usd"]
+        total_usd  = stats["total_pnl_usd"]
+        wins       = stats["wins"]
+        losses     = stats["losses"]
+        timeouts   = stats["timeouts"]
+
         return f"""Du bist ein erfahrener quantitativer NQ Futures Trading-Analyst.
 Du analysierst ein automatisches Trading-System und optimierst dessen \
 Signal-Gewichtungen basierend auf realen Simulationsdaten.
@@ -205,58 +227,58 @@ MULTI_TF_BIAS:
 - Prüft ob EMA9 > EMA21 auf BEIDEN Zeitrahmen (5min UND 15min)
 - Bullish wenn beide EMAs ausgerichtet sind + Preis über VWAP
 - Stärkster Trend-Indikator im System
-- Gewichtung aktuell: {weights.get('MULTI_TF_BIAS', 1.0):.2f}
+- Gewichtung aktuell: {w_multi:.2f}
 
 FAIR_VALUE_GAP (FVG):
 - 3-Kerzen-Muster: mittlere Kerze springt so stark dass eine
   Preislücke entsteht (Institutioneller Footprint)
 - Signal bei Retest dieser Lücke (Preis kehrt zurück)
 - Sehr verlässlich in trendfolgenden Märkten
-- Gewichtung aktuell: {weights.get('FAIR_VALUE_GAP', 1.0):.2f}
+- Gewichtung aktuell: {w_fvg:.2f}
 
 VIX_REGIME:
 - VIX < 15: Ruhiger Markt (Trend-Setups bevorzugen)
 - VIX 15-25: Normaler Markt (alle Setups)
 - VIX 25-30: Volatiler Markt (nur High-Konfidenz)
 - VIX > 30: Extremer Markt (keine Signale)
-- Gewichtung aktuell: {weights.get('VIX_REGIME', 1.0):.2f}
+- Gewichtung aktuell: {w_vix:.2f}
 
 OVERNIGHT_GAP:
 - Gap > 0.3% zwischen gestrigem Close und heutigem Open
 - Trade in Richtung Gap-Fill in ersten 90 Minuten
 - Funktioniert gut bei klaren Richtungs-Gaps
-- Gewichtung aktuell: {weights.get('OVERNIGHT_GAP', 1.0):.2f}
+- Gewichtung aktuell: {w_gap:.2f}
 
 EMA_TREND:
 - EMA9 vs EMA21 Kreuzung auf 30-Sekunden-Bars
 - Kurzfristiger Trend-Indikator
 - Bestätigt oder widerspricht dem übergeordneten Bias
-- Gewichtung aktuell: {weights.get('EMA_TREND', 1.0):.2f}
+- Gewichtung aktuell: {w_ema:.2f}
 
 VWAP_POSITION:
 - VWAP = Volume Weighted Average Price (institutioneller Fairwert)
 - Preis über VWAP = Käufer dominieren
 - Preis unter VWAP = Verkäufer dominieren
 - Abstand zum VWAP zeigt Momentum-Stärke
-- Gewichtung aktuell: {weights.get('VWAP_POSITION', 1.0):.2f}
+- Gewichtung aktuell: {w_vwap:.2f}
 
 RSI_EXTREME:
 - RSI < 30 = Überverkauft (Long-Setup)
 - RSI > 70 = Überkauft (Short-Setup)
 - Kontra-Trend Signal — funktioniert besonders bei hohem VIX
-- Gewichtung aktuell: {weights.get('RSI_EXTREME', 1.0):.2f}
+- Gewichtung aktuell: {w_rsi:.2f}
 
 MEAN_REVERSION:
 - Preis weit von VWAP entfernt (> 0.8 ATR)
 - Erwartung der Rückkehr zum Mittelwert
 - Funktioniert in seitwärts tendierenden Märkten gut
-- Gewichtung aktuell: {weights.get('MEAN_REVERSION', 1.0):.2f}
+- Gewichtung aktuell: {w_mean:.2f}
 
 KONTEXT-MODIFIKATOREN:
-- VIX hoch Abzug: {weights.get('_vix_high_penalty', 0.8):.2f} (Konfidenz × dieser Faktor bei VIX 25-30)
-- VIX extrem Abzug: {weights.get('_vix_extreme_penalty', 0.5):.2f} (bei VIX > 30)
-- RTH Open Bonus: {weights.get('_time_open_bonus', 1.2):.2f} (erste 30 Min mehr Gewicht)
-- RTH Close Abzug: {weights.get('_time_close_penalty', 0.9):.2f} (letzte 30 Min weniger)
+- VIX hoch Abzug: {w_vhp:.2f} (Konfidenz × dieser Faktor bei VIX 25-30)
+- VIX extrem Abzug: {w_vep:.2f} (bei VIX > 30)
+- RTH Open Bonus: {w_tob:.2f} (erste 30 Min mehr Gewicht)
+- RTH Close Abzug: {w_tcp:.2f} (letzte 30 Min weniger)
 
 NQ-SPEZIFISCHES MARKTWISSEN:
 - NQ ist volatiler als ES (höherer ATR)
@@ -271,26 +293,26 @@ AKTUELLE PERFORMANCE-DATEN
 ════════════════════════════════════════
 
 GESAMTSTATISTIK:
-- Trades gesamt: {stats['total']}
-- Win-Rate: {stats['win_rate']}% (Ziel: >62%)
-- Avg P&L: {stats['avg_pnl_points']:+.2f} Punkte / ${stats['avg_pnl_usd']:+.0f} pro Trade
-- Gesamt P&L: ${stats['total_pnl_usd']:+.0f}
-- Wins: {stats['wins']} | Losses: {stats['losses']} | Timeouts: {stats['timeouts']}
+- Trades gesamt: {total}
+- Win-Rate: {win_rate}% (Ziel: >62%)
+- Avg P&L: {avg_pts:+.2f} Punkte / ${avg_usd:+.0f} pro Trade
+- Gesamt P&L: ${total_usd:+.0f}
+- Wins: {wins} | Losses: {losses} | Timeouts: {timeouts}
 
 WIN-RATE NACH SIGNAL-TYP:
-{json.dumps(stats.get('best_signal_types', {}), indent=2, ensure_ascii=False)}
+{stats_signals_json}
 
 WIN-RATE NACH VIX-REGIME:
-{json.dumps(stats.get('win_rate_by_regime', {}), indent=2, ensure_ascii=False)}
+{stats_regime_json}
 
 WIN-RATE NACH TAGESZEIT:
-{json.dumps(stats.get('win_rate_by_time', {}), indent=2, ensure_ascii=False)}
+{stats_time_json}
 
 AKTUELLE SIGNAL-GEWICHTUNGEN:
-{json.dumps({{k: v for k, v in weights.items() if not k.startswith('_')}}, indent=2)}
+{weights_json}
 
-LETZTE {len(trade_details)} TRADES (detailliert):
-{json.dumps(trade_details, indent=2, ensure_ascii=False)}
+LETZTE {n_trades} TRADES (detailliert):
+{trade_details_json}
 
 ════════════════════════════════════════
 ANPASSBARE STRATEGIE-PARAMETER

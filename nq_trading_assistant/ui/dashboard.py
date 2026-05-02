@@ -204,25 +204,46 @@ def _sidebar(state: Optional[dict]) -> None:
 
         st.divider()
 
-        # ── Claude cost & cache stats ──────────────────────────────────────
+        # ── KI Provider stats ──────────────────────────────────────────────
         if state is not None:
-            cs = state.get("claude_cost_stats", {})
+            cs            = state.get("claude_cost_stats", {})
+            provider      = cs.get("provider", "")
+            current_model = cs.get("current_model", "")
             if cs.get("total_calls", 0) > 0:
-                st.subheader("Claude API")
-                hit_pct = cs.get("cache_hit_rate", 0.0) * 100
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.metric("Calls",  cs.get("total_calls", 0))
-                    st.metric("Cache ✓", cs.get("cached_calls", 0))
-                with c2:
-                    st.metric("Hit-Rate", f"{hit_pct:.0f}%")
-                    st.metric("Kosten",   f"${cs.get('estimated_cost_usd', 0):.4f}")
-                if hit_pct >= 50:
-                    st.caption("🟢 Cache aktiv — ~90 % Ersparnis auf gecachte Tokens")
-                elif cs.get("total_calls", 0) == 1:
-                    st.caption("⏳ Erster Call — Cache wird beim nächsten Aufruf greifen")
+                if "Gemini" in provider:
+                    st.subheader("KI Provider")
+                    if "2.5" in current_model:
+                        st.success(f"🧠 {current_model}")
+                    else:
+                        st.warning(f"🔄 {current_model} (Fallback)")
+                    failures = cs.get("model_failures", {})
+                    if any(v > 0 for v in failures.values()):
+                        st.caption(
+                            "gemini-2.5-flash Quota heute erreicht → "
+                            "gemini-2.0-flash-lite aktiv"
+                        )
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.metric("Calls", cs.get("total_calls", 0))
+                    with c2:
+                        available = len(cs.get("models_available", []))
+                        st.metric("Modelle", f"{available}/{len(cs.get('model_failures', {}))}")
                 else:
-                    st.caption("🟡 Cache-Rate niedrig")
+                    st.subheader("Claude API")
+                    hit_pct = cs.get("cache_hit_rate", 0.0) * 100
+                    c1, c2  = st.columns(2)
+                    with c1:
+                        st.metric("Calls",   cs.get("total_calls", 0))
+                        st.metric("Cache ✓", cs.get("cached_calls", 0))
+                    with c2:
+                        st.metric("Hit-Rate", f"{hit_pct:.0f}%")
+                        st.metric("Kosten",   f"${cs.get('estimated_cost_usd', 0):.4f}")
+                    if hit_pct >= 50:
+                        st.caption("🟢 Cache aktiv — ~90 % Ersparnis auf gecachte Tokens")
+                    elif cs.get("total_calls", 0) == 1:
+                        st.caption("⏳ Erster Call — Cache wird beim nächsten Aufruf greifen")
+                    else:
+                        st.caption("🟡 Cache-Rate niedrig")
                 st.divider()
 
         # ── Manual trade log ───────────────────────────────────────────────
