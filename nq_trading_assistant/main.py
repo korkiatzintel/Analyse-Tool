@@ -330,6 +330,7 @@ def _write_ui_state() -> None:
             "realtime_price":       free.get("realtime_price", 0.0),
             "realtime_last_update": free.get("realtime_last_update", ""),
             "scan":                      _APP.last_scan,
+            "ict_signals":               (_APP.last_scan or {}).get("ict_signals", {}),
             "signals":                   _APP.last_rec,
             "limit_orders":              _APP.last_limit_orders,
             "bias":                      free.get("bias", {}),

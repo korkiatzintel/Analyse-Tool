@@ -35,6 +35,7 @@ from signals.free_signals import (
     FreeMarketAnalyzer,
     _VIX_HIGH,
 )
+from signals.ict_engine import ICTSignalEngine
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,7 @@ class SignalEngine:
         self._of_analyzer   = OrderFlowAnalyzer()
         self._ta_analyzer   = TechnicalAnalyzer()
         self._free_analyzer = FreeMarketAnalyzer()
+        self._ict           = ICTSignalEngine()
         self.trade_setup    = TradeSetup()
         self._cfg           = strategy_config
         self.threshold      = (
@@ -737,16 +739,58 @@ class SignalEngine:
                         f"({bias_direction} {bias_prob:.0f}%)"
                     )
 
+        # ICT analysis — FVG / Order Blocks / Market Structure / Killzones
+        ict_signals = self._ict.analyze(
+            ctx.get("bars_5m",  []),
+            ctx.get("bars_15m", []),
+        )
+        ict_score       = ict_signals.get("ict_score", 0.0)
+        killzone_bonus  = ict_signals.get("killzone_bonus", 1.0)
+        killzone        = ict_signals.get("active_killzone")
+
+        # Apply killzone bonus and inject ICT_CONFLUENCE signal
+        for candidate in candidates:
+            if candidate.get("is_signal") or candidate["confidence"] > 0.3:
+                candidate["confidence"] = round(
+                    min(0.99, candidate["confidence"] * killzone_bonus), 3
+                )
+                if candidate["confidence"] >= self.threshold:
+                    candidate["is_signal"] = True
+
+            if ict_score > 0.3:
+                candidate.setdefault("signals", []).append({
+                    "type":        "ICT_CONFLUENCE",
+                    "direction":   candidate["direction"],
+                    "confidence":  round(ict_score, 3),
+                    "description": " | ".join(ict_signals.get("ict_reasons", [])),
+                    "metadata": {
+                        "killzone":         killzone,
+                        "market_structure": ict_signals.get("market_structure"),
+                        "order_blocks":     len(ict_signals.get("order_blocks", [])),
+                        "fvg_count":        len(ict_signals.get("fvg_levels", [])),
+                    },
+                })
+
+        # Outside killzones: require ≥80% confidence to fire a signal
+        if not killzone:
+            for candidate in candidates:
+                if candidate.get("is_signal") and candidate["confidence"] < 0.80:
+                    candidate["is_signal"]      = False
+                    candidate["blocked_reason"] = (
+                        "Außerhalb ICT Killzone — Konfidenz < 80% benötigt"
+                    )
+
         candidates.sort(key=lambda x: x["confidence"], reverse=True)
         for i, c in enumerate(candidates):
             c["rank"] = i + 1
 
         best = candidates[0]
         return {
-            "candidates": candidates,
-            "best_signal": best,
-            "any_signal": any(c["is_signal"] for c in candidates),
-            "threshold": self.threshold,
+            "candidates":   candidates,
+            "best_signal":  best,
+            "any_signal":   any(c["is_signal"] for c in candidates),
+            "threshold":    self.threshold,
+            "ict_signals":  ict_signals,
         }
 
     def _get_all_signals(self, ctx: dict) -> List[dict]:

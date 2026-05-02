@@ -113,10 +113,25 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         weights_raw = self._call_analyst(prompt_2, max_tokens=300)
 
         # ── CALL 3: Handlungsempfehlungen (text, max 300 tokens) ──────────
+        # Killzone win-rate aus Trade-Daten ableiten
+        killzone_trades = [
+            t for t in closed_trades
+            if "ICT_CONFLUENCE" in t.get("active_signals", [])
+        ]
+        kz_total = len(killzone_trades)
+        kz_wins  = sum(1 for t in killzone_trades if t.get("outcome") == "WIN")
+        kz_info  = (
+            f"ICT_CONFLUENCE Trades: {kz_total}, Win-Rate: "
+            f"{round(kz_wins/kz_total*100,1) if kz_total else 'n/a'}%"
+        )
+
         prompt_3 = (
             f"NQ Trading System, Win-Rate {stats['win_rate']}%.\n"
-            f"Diagnose: {diagnose[:200]}\n\n"
+            f"Diagnose: {diagnose[:200]}\n"
+            f"ICT Killzone-Daten: {kz_info}\n\n"
             "Gib genau 3 konkrete Handlungsempfehlungen auf Deutsch.\n"
+            "Bewerte auch ob ICT Killzone-Filter strenger oder lockerer "
+            "sein soll (Trades innerhalb vs. außerhalb Killzones).\n"
             "Format: Nummerierte Liste, je max 1 Satz."
         )
         empfehlungen_raw = self._call_analyst(prompt_3, max_tokens=300)

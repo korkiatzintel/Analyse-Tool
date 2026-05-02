@@ -906,6 +906,42 @@ def main() -> None:
                     f"und als Signal ausgegeben."
                 )
 
+        # ── ICT Killzone & Confluence ───────────────────────────────────────
+        ict = state.get("ict_signals", {})
+        if ict and not ict.get("error"):
+            st.subheader("⚔️ ICT Analyse")
+            killzone  = ict.get("active_killzone")
+            ict_score = ict.get("ict_score", 0.0)
+
+            if killzone:
+                st.success(f"🎯 **ICT Killzone aktiv: {killzone}** — Optimale Trading-Zeit!")
+            else:
+                st.info("⏰ Keine aktive Killzone — Nächste: NY AM (10:00–11:00 EST)")
+
+            if ict_score > 0:
+                col_ict1, col_ict2 = st.columns(2)
+                with col_ict1:
+                    st.metric("ICT Confluence Score", f"{ict_score:.0%}")
+                    st.progress(ict_score)
+                with col_ict2:
+                    ms = ict.get("market_structure", {})
+                    if ms:
+                        st.metric(
+                            "Market Structure",
+                            ms.get("type", "?"),
+                            delta=ms.get("direction", ""),
+                        )
+                    else:
+                        ob_count  = len(ict.get("order_blocks", []))
+                        fvg_count = len(ict.get("fvg_levels", []))
+                        st.metric("Order Blocks / FVGs", f"{ob_count} OB / {fvg_count} FVG")
+
+                reasons = ict.get("ict_reasons", [])
+                if reasons:
+                    with st.expander("📋 ICT Signal Details"):
+                        for r in reasons:
+                            st.markdown(f"• {r}")
+
         # ── Konfidenz-Analyse Panel ─────────────────────────────────────────
         with st.expander("🔍 Konfidenz-Analyse", expanded=False):
             signals_list = state.get("signals", {}).get("signals", [])
