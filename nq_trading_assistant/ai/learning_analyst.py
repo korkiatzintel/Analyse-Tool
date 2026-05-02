@@ -56,7 +56,7 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
 
     def run_daily_analysis(self, simulator, strategy_config=None) -> dict:
         stats           = simulator.get_stats()
-        closed_trades   = simulator.get_closed_trades(limit=15)
+        closed_trades   = simulator.get_closed_trades(limit=20)
         current_weights = simulator.get_weights()
         self._strategy_config = strategy_config
 
@@ -66,75 +66,117 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
                 "message": f"Zu wenige Trades ({stats['total']}). Mindestens 5 benötigt.",
             }
 
-        # Compact trade lines: one per row to minimise token count
-        trade_summary = [
-            f"{t['direction']} {t.get('confidence', 0):.0%} "
-            f"→ {t.get('outcome', '?')} "
-            f"({', '.join(t.get('active_signals', [])[:2])})"
-            for t in closed_trades[:15]
-        ]
+        # ── Daten kompakt aufbereiten ─────────────────────────────────────
+        trade_lines = []
+        for t in closed_trades[:15]:
+            kz  = t.get("killzone") or "-"
+            ms  = (t.get("market_structure") or "-")[:15]
+            ict = f"{t.get('ict_score', 0) or 0:.0%}"
+            ob  = t.get("order_blocks_active", 0) or 0
+            sigs = ",".join((t.get("active_signals") or [])[:3])
+            trade_lines.append(
+                f"{t['direction']} {t.get('confidence', 0):.0%}"
+                f"→{t.get('outcome', '?')} | "
+                f"KZ:{kz} MS:{ms} ICT:{ict} OB:{ob} | {sigs}"
+            )
+        trades_compact = "\n".join(trade_lines)
 
-        weights_simple = {
-            k: v for k, v in current_weights.items()
+        stats_compact = (
+            f"Trades:{stats['total']} "
+            f"WR:{stats['win_rate']}% "
+            f"W:{stats['wins']} L:{stats['losses']} T:{stats['timeouts']}\n"
+            f"AvgPnL:{stats['avg_pnl_points']:+.1f}Pts "
+            f"TotalPnL:${stats['total_pnl_usd']:+.0f}"
+        )
+
+        sig_perf = " | ".join(
+            f"{k}:{v}%" for k, v in stats.get("best_signal_types", {}).items()
+        )
+
+        kz_stats   = stats.get("win_rate_by_killzone", {})
+        kz_compact = (
+            f"InKZ:{kz_stats.get('IN_KILLZONE', 0)}% "
+            f"OutKZ:{kz_stats.get('OUTSIDE_KILLZONE', 0)}%"
+        )
+        ms_stats = " | ".join(
+            f"{k}:{v}%" for k, v in stats.get("win_rate_by_market_structure", {}).items()
+        )
+        ict_score_stats = " | ".join(
+            f"{k}:{v}%" for k, v in stats.get("win_rate_by_ict_score", {}).items()
+        )
+        ob_stats   = stats.get("win_rate_by_order_blocks", {})
+        ob_compact = (
+            f"MitOB:{ob_stats.get('MIT_OB', 0)}% "
+            f"OhneOB:{ob_stats.get('OHNE_OB', 0)}%"
+        )
+        weights_compact = " | ".join(
+            f"{k}:{v:.2f}"
+            for k, v in current_weights.items()
             if not k.startswith("_") and isinstance(v, (int, float))
-        }
+        )
 
-        # ── CALL 1: Diagnose (text, max 400 tokens) ───────────────────────
+        # ── CALL 1: Diagnose (~300 Token Output) ──────────────────────────
         prompt_1 = (
-            f"NQ Futures Trading System Analyse.\n\n"
-            f"Stats: {stats['total']} Trades, Win-Rate {stats['win_rate']}%\n"
-            f"Win nach Zeit: {stats.get('win_rate_by_time', {})}\n"
-            f"Win nach VIX: {stats.get('win_rate_by_regime', {})}\n"
-            f"Beste Signale: {stats.get('best_signal_types', {})}\n\n"
-            f"Letzte 15 Trades (Richtung/Konfidenz/Ergebnis/Signale):\n"
-            + "\n".join(trade_summary)
-            + "\n\nSchreibe 3 kurze Stichpunkte was verbessert werden muss. Auf Deutsch."
+            f"NQ Futures Trading System — Kurzanalyse auf Deutsch.\n\n"
+            f"PERFORMANCE:\n{stats_compact}\n"
+            f"Signale: {sig_perf}\n"
+            f"Zeit: {' | '.join(f'{k}:{v}%' for k, v in stats.get('win_rate_by_time', {}).items())}\n"
+            f"VIX: {' | '.join(f'{k}:{v}%' for k, v in stats.get('win_rate_by_regime', {}).items())}\n\n"
+            f"ICT ANALYSE:\n"
+            f"Killzones: {kz_compact}\n"
+            f"Market Structure: {ms_stats}\n"
+            f"ICT Score: {ict_score_stats}\n"
+            f"Order Blocks: {ob_compact}\n\n"
+            f"LETZTE 15 TRADES:\n{trades_compact}\n\n"
+            f"Schreibe 4 kurze Stichpunkte (je max 15 Wörter):\n"
+            f"1. Größte Stärke\n"
+            f"2. Größtes Problem\n"
+            f"3. ICT-Killzone sinnvoll? (ja/nein + Begründung)\n"
+            f"4. Wichtigste Sofort-Maßnahme"
         )
-        diagnose = self._call_analyst(prompt_1, max_tokens=400)
+        diagnose = self._call_analyst(prompt_1, max_tokens=350)
+        self._log.info("Diagnose erhalten: %d Zeichen", len(diagnose))
 
-        # ── CALL 2: Gewichtungen (JSON-only, max 300 tokens) ──────────────
-        weights_list = "\n".join(f"- {k}: {v:.2f}" for k, v in weights_simple.items())
-        best_signals = stats.get("best_signal_types", {})
-        worst_3      = dict(sorted(best_signals.items(), key=lambda x: x[1])[:3])
-
+        # ── CALL 2: Signal-Gewichtungen (~200 Token Output) ───────────────
         prompt_2 = (
-            f"Basierend auf: Win-Rate {stats['win_rate']}%, "
-            f"beste Signale: {best_signals}, "
-            f"schlechteste: {worst_3}, "
-            f"Diagnose: {diagnose[:300]}\n\n"
-            f"Aktuelle Gewichtungen:\n{weights_list}\n\n"
-            "Gib NUR ein JSON-Objekt zurück (kein Text davor/danach):\n"
-            '{"MULTI_TF_BIAS": 1.0, "FAIR_VALUE_GAP": 1.0, "VIX_REGIME": 1.0, '
-            '"OVERNIGHT_GAP": 1.0, "EMA_TREND": 1.0, "VWAP_POSITION": 1.0, '
-            '"RSI_EXTREME": 1.0, "MEAN_REVERSION": 1.0, "SESSION_LEVELS": 1.0}\n\n'
-            "Ändere nur Werte die laut den Daten angepasst werden müssen. "
-            "Range: 0.5–1.5. Max Änderung: 0.25 pro Signal."
-        )
-        weights_raw = self._call_analyst(prompt_2, max_tokens=300)
-
-        # ── CALL 3: Handlungsempfehlungen (text, max 300 tokens) ──────────
-        # Killzone win-rate aus Trade-Daten ableiten
-        killzone_trades = [
-            t for t in closed_trades
-            if "ICT_CONFLUENCE" in t.get("active_signals", [])
-        ]
-        kz_total = len(killzone_trades)
-        kz_wins  = sum(1 for t in killzone_trades if t.get("outcome") == "WIN")
-        kz_info  = (
-            f"ICT_CONFLUENCE Trades: {kz_total}, Win-Rate: "
-            f"{round(kz_wins/kz_total*100,1) if kz_total else 'n/a'}%"
-        )
-
-        prompt_3 = (
-            f"NQ Trading System, Win-Rate {stats['win_rate']}%.\n"
+            f"NQ System Gewichtungen optimieren.\n\n"
             f"Diagnose: {diagnose[:200]}\n"
-            f"ICT Killzone-Daten: {kz_info}\n\n"
-            "Gib genau 3 konkrete Handlungsempfehlungen auf Deutsch.\n"
-            "Bewerte auch ob ICT Killzone-Filter strenger oder lockerer "
-            "sein soll (Trades innerhalb vs. außerhalb Killzones).\n"
-            "Format: Nummerierte Liste, je max 1 Satz."
+            f"Win-Rate: {stats['win_rate']}%\n"
+            f"Signale (Win-Rate%): {sig_perf}\n"
+            f"ICT Score Korrelation: {ict_score_stats}\n"
+            f"OB Einfluss: {ob_compact}\n\n"
+            f"Aktuelle Gewichtungen:\n{weights_compact}\n\n"
+            f"Antworte NUR mit JSON (kein Text davor/danach):\n"
+            f"Regeln: Werte 0.5-1.5, max ±0.2 Änderung, max 4 Änderungen.\n"
+            f'Format exakt:\n'
+            f'{{"MULTI_TF_BIAS":1.0,"FAIR_VALUE_GAP":1.0,"VIX_REGIME":1.0,'
+            f'"OVERNIGHT_GAP":1.0,"EMA_TREND":1.0,"VWAP_POSITION":1.0,'
+            f'"RSI_EXTREME":1.0,"MEAN_REVERSION":1.0,"SESSION_LEVELS":1.0,'
+            f'"ICT_CONFLUENCE":1.0}}'
         )
-        empfehlungen_raw = self._call_analyst(prompt_3, max_tokens=300)
+        weights_raw = self._call_analyst(prompt_2, max_tokens=250)
+        self._log.info("Gewichtungen erhalten: %d Zeichen", len(weights_raw))
+
+        # ── CALL 3: ICT Parameter + Empfehlungen (~300 Token) ─────────────
+        prompt_3 = (
+            f"NQ ICT Parameter + Handlungsempfehlungen.\n\n"
+            f"Diagnose: {diagnose[:150]}\n"
+            f"Killzone: {kz_compact}\n"
+            f"OB: {ob_compact}\n"
+            f"MS: {ms_stats}\n\n"
+            f"Antworte NUR mit JSON:\n"
+            f'{{"ict_empfehlungen":{{"killzone_filter_staerken":true,'
+            f'"beste_market_structure":"CHOCH_BULLISH",'
+            f'"ict_score_schwelle":0.3,"order_block_pflicht":false}},'
+            f'"kontext_anpassungen":{{"_vix_high_penalty":0.8,'
+            f'"_time_open_bonus":1.2,"_time_close_penalty":0.9,'
+            f'"outside_killzone_confidence_penalty":0.85}},'
+            f'"handlungsempfehlungen":["Empfehlung 1 max 12 Wörter",'
+            f'"Empfehlung 2 max 12 Wörter","Empfehlung 3 max 12 Wörter"],'
+            f'"naechste_analyse_in":"Nach X Trades"}}'
+        )
+        params_raw = self._call_analyst(prompt_3, max_tokens=350)
+        self._log.info("Parameter erhalten: %d Zeichen", len(params_raw))
 
         # ── Parse Gewichtungen ────────────────────────────────────────────
         neue_gewichtungen: dict = {}
@@ -144,55 +186,97 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             end   = w.rfind("}") + 1
             if start >= 0 and end > start:
                 w = w[start:end]
-            neue_gewichtungen = json.loads(w)
+            parsed_w = json.loads(w)
+            neue_gewichtungen = {
+                k: max(0.5, min(1.5, float(v)))
+                for k, v in parsed_w.items()
+                if isinstance(v, (int, float))
+            }
         except Exception as e:
             self._log.error("Gewichtungen Parse Error: %s | raw: %s", e, weights_raw[:200])
 
-        # ── Parse Empfehlungen ────────────────────────────────────────────
-        empfehlungen = []
-        for line in empfehlungen_raw.strip().splitlines():
-            clean = line.strip().lstrip("0123456789.-) ").strip()
-            if clean:
-                empfehlungen.append(clean)
+        # ── Parse ICT Parameter + Empfehlungen ───────────────────────────
+        ict_empfehlungen:     dict = {}
+        kontext_anpassungen:  dict = {}
+        handlungsempfehlungen: list = []
+        naechste_analyse = "Nach 20 weiteren Trades"
+
+        try:
+            p = params_raw.strip().replace("```json", "").replace("```", "").strip()
+            start = p.find("{")
+            end   = p.rfind("}") + 1
+            if start >= 0 and end > start:
+                p = p[start:end]
+            parsed_p = json.loads(p)
+            ict_empfehlungen      = parsed_p.get("ict_empfehlungen", {})
+            kontext_anpassungen   = parsed_p.get("kontext_anpassungen", {})
+            handlungsempfehlungen = parsed_p.get("handlungsempfehlungen", [])
+            naechste_analyse      = parsed_p.get("naechste_analyse_in", naechste_analyse)
+        except Exception as e:
+            self._log.error("Parameter Parse Error: %s | raw: %s", e, params_raw[:200])
 
         # ── Signal-Bewertung aus Stats ────────────────────────────────────
         signal_bewertung: dict = {}
-        for sig, wr in best_signals.items():
+        for sig, wr in stats.get("best_signal_types", {}).items():
             signal_bewertung[sig] = {
                 "win_rate":    wr,
-                "empfehlung":  "STAERKEN" if wr >= 60 else ("REDUZIEREN" if wr <= 40 else "BEIBEHALTEN"),
-                "begruendung": f"Win-Rate {wr}% basierend auf {stats['total']} Trades",
+                "empfehlung":  ("STAERKEN" if wr >= 60
+                                else "REDUZIEREN" if wr <= 40
+                                else "BEIBEHALTEN"),
+                "begruendung": f"Win-Rate {wr}% aus {stats['total']} Trades",
             }
 
-        # ── Baue finales Result ───────────────────────────────────────────
+        # ── Gewichtungen + Kontext anwenden ──────────────────────────────
+        all_weights = {**neue_gewichtungen, **kontext_anpassungen}
+        if all_weights:
+            simulator.apply_weights(all_weights)
+            self._log.info(
+                "Angepasst: %d Signale, %d Kontext-Parameter",
+                len(neue_gewichtungen), len(kontext_anpassungen),
+            )
+
+        # ── ICT Empfehlungen in Strategy Config schreiben ────────────────
+        if strategy_config and ict_empfehlungen:
+            try:
+                ict_params: dict = {}
+                if "ict_score_schwelle" in ict_empfehlungen:
+                    ict_params["ict_score_min_threshold"] = \
+                        ict_empfehlungen["ict_score_schwelle"]
+                if "outside_killzone_confidence_penalty" in kontext_anpassungen:
+                    ict_params["outside_killzone_confidence_penalty"] = \
+                        kontext_anpassungen["outside_killzone_confidence_penalty"]
+                if ict_params:
+                    strategy_config.update_from_gemini({"ICT_PARAMETER": ict_params})
+            except Exception as e:
+                self._log.error("ICT Config Update Fehler: %s", e)
+
+        # ── Finales Result ────────────────────────────────────────────────
         result = {
             "analyse": {
-                "zusammenfassung": diagnose[:500],
+                "zusammenfassung": diagnose[:600],
                 "staerken":        [],
                 "schwaechen":      [],
                 "muster":          [],
             },
             "signal_bewertung":      signal_bewertung,
             "neue_gewichtungen":     neue_gewichtungen,
-            "kontext_anpassungen":   {},
-            "handlungsempfehlungen": empfehlungen[:3],
-            "naechste_analyse_in":   "Nach 20–30 weiteren Trades",
+            "kontext_anpassungen":   kontext_anpassungen,
+            "ict_empfehlungen":      ict_empfehlungen,
+            "handlungsempfehlungen": handlungsempfehlungen[:3],
+            "naechste_analyse_in":   naechste_analyse,
+            "calls_used":            3,
         }
 
-        # ── Wende Gewichtungen an ─────────────────────────────────────────
-        if neue_gewichtungen:
-            simulator.apply_weights(neue_gewichtungen)
-            self._log.info(
-                "Gewichtungen aktualisiert: %d Signale angepasst",
-                len(neue_gewichtungen),
-            )
-
-        # ── Speichere Analyse ─────────────────────────────────────────────
+        # ── Speichern ─────────────────────────────────────────────────────
+        weights_simple = {
+            k: v for k, v in current_weights.items()
+            if not k.startswith("_") and isinstance(v, (int, float))
+        }
         analysis_record = {
-            "timestamp":       datetime.utcnow().isoformat(),
-            "stats_snapshot":  stats,
-            "result":          result,
-            "trades_analyzed": stats["total"],
+            "timestamp":        datetime.utcnow().isoformat(),
+            "stats_snapshot":   stats,
+            "result":           result,
+            "trades_analyzed":  stats["total"],
             "previous_weights": weights_simple,
         }
 
@@ -207,10 +291,17 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             encoding="utf-8",
         )
 
+        last_result_path = Path(__file__).parent.parent / "logs" / "last_learning_result.json"
+        last_result_path.write_text(
+            json.dumps(analysis_record, indent=2, default=str),
+            encoding="utf-8",
+        )
+
         self._log.info(
             "Learning Analysis fertig: %d Trades, Win-Rate %s%%, "
-            "%d Gewichtungen aktualisiert",
-            stats["total"], stats["win_rate"], len(neue_gewichtungen),
+            "%d Gewichtungen, %d ICT-Parameter",
+            stats["total"], stats["win_rate"],
+            len(neue_gewichtungen), len(ict_empfehlungen),
         )
 
         return {"status": "success", "result": result, "stats": stats}
