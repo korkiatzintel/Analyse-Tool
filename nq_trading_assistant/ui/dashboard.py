@@ -1151,7 +1151,44 @@ def main() -> None:
 
                     # Zusammenfassung
                     st.markdown("### 📋 Was hat die KI herausgefunden?")
-                    st.markdown(f"> {analyse.get('zusammenfassung', '')}")
+                    zusammenfassung = analyse.get("zusammenfassung", "")
+                    if zusammenfassung:
+                        import re as _re
+                        _clean = zusammenfassung.strip()
+                        if _clean.startswith(("{", "[")):
+                            try:
+                                _parsed = json.loads(_clean)
+                                _texts: list = []
+
+                                def _collect(_o):
+                                    if isinstance(_o, str) and len(_o) > 5:
+                                        _texts.append(_o)
+                                    elif isinstance(_o, list):
+                                        for _i in _o:
+                                            _collect(_i)
+                                    elif isinstance(_o, dict):
+                                        for _v in _o.values():
+                                            _collect(_v)
+
+                                _collect(_parsed)
+                                _clean = "\n\n".join(_texts)
+                            except Exception:
+                                _clean = _re.sub(r'[{}\[\]":]', " ", _clean)
+                                _clean = _re.sub(r"\s+", " ", _clean).strip()
+                        # Split into numbered points at known separators
+                        _lines: list = []
+                        for _sep in (" | ", "\n", ". "):
+                            if _sep in _clean:
+                                _lines = [l.strip() for l in _clean.split(_sep) if l.strip()]
+                                break
+                        if _lines and len(_lines) > 1:
+                            for _idx, _line in enumerate(_lines[:6], 1):
+                                if _line:
+                                    st.markdown(f"**{_idx}.** {_line}")
+                        else:
+                            st.markdown(f"> {_clean[:800]}")
+                    else:
+                        st.info("Noch keine Analyse vorhanden.")
                     st.divider()
 
                     # Strategien — Herzstück
@@ -1202,9 +1239,15 @@ def main() -> None:
                         st.divider()
 
                     # Handlungsempfehlungen
-                    st.markdown("### ✅ Was solltest du als Trader beachten?")
-                    for i, emp in enumerate(result_data.get("handlungsempfehlungen", []), 1):
-                        st.markdown(f"**{i}.** {emp}")
+                    empfehlungen = result_data.get("handlungsempfehlungen", [])
+                    if empfehlungen:
+                        st.markdown("### ✅ Handlungsempfehlungen")
+                        import re as _re2
+                        for _i, _emp in enumerate(empfehlungen[:3], 1):
+                            if _emp and isinstance(_emp, str):
+                                _emp_clean = _re2.sub(r'[{}\[\]":]', "", _emp).strip()
+                                if _emp_clean:
+                                    st.markdown(f"**{_i}.** {_emp_clean}")
 
                     naechste = result_data.get("naechste_analyse_in", "")
                     if naechste:
@@ -1214,23 +1257,24 @@ def main() -> None:
                     ict_emp = result_data.get("ict_empfehlungen", {})
                     if ict_emp:
                         st.divider()
-                        st.markdown("### 🎯 ICT-spezifische Erkenntnisse")
+                        st.markdown("### 🎯 ICT Erkenntnisse")
 
-                        if ict_emp.get("killzone_filter_staerken"):
-                            st.success("✅ Killzone-Filter bestätigt — Trades außerhalb deutlich schlechter")
-                        else:
-                            st.info("ℹ️ Killzone-Filter zeigt noch keinen klaren Vorteil")
+                        kz = ict_emp.get("killzone_filter_staerken", None)
+                        if kz is True:
+                            st.success("✅ Killzone-Filter bestätigt — außerhalb schlechtere Performance")
+                        elif kz is False:
+                            st.info("ℹ️ Killzone-Filter noch kein klarer Vorteil")
 
                         beste_ms = ict_emp.get("beste_market_structure", "")
                         if beste_ms:
                             st.info(f"📊 Beste Market Structure: **{beste_ms}**")
 
-                        schwelle = ict_emp.get("ict_score_schwelle_empfehlung", 0)
+                        schwelle = ict_emp.get("ict_score_schwelle") or ict_emp.get("ict_score_schwelle_empfehlung", 0)
                         if schwelle:
                             st.caption(f"🎯 Empfohlene ICT Score-Schwelle: {schwelle:.2f}")
 
-                        if ict_emp.get("order_block_pflicht"):
-                            st.warning("⚠️ Order Blocks stark empfohlen — ohne OB deutlich schlechtere Win-Rate")
+                        if ict_emp.get("order_block_pflicht") is True:
+                            st.warning("⚠️ Order Blocks stark empfohlen")
 
                     # Parameter-Änderungen
                     update_report     = result_data.get("update_report", {})

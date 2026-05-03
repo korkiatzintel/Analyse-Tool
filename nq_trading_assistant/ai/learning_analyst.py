@@ -1,7 +1,37 @@
 import json
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
+
+
+def _clean_diagnose(text: str) -> str:
+    """Bereinige Gemini-Diagnosetext — entferne JSON-Artefakte wenn nötig."""
+    clean = text.strip().replace("```json", "").replace("```", "").strip()
+
+    if clean.startswith(("{", "[")):
+        try:
+            parsed = json.loads(clean)
+
+            def _extract(obj, depth=0) -> str:
+                if depth > 3:
+                    return ""
+                if isinstance(obj, str):
+                    return obj
+                if isinstance(obj, list):
+                    return " | ".join(_extract(i, depth + 1) for i in obj if i)
+                if isinstance(obj, dict):
+                    return " | ".join(
+                        _extract(v, depth + 1) for v in obj.values() if v
+                    )
+                return str(obj)
+
+            clean = _extract(parsed)
+        except Exception:
+            clean = re.sub(r'[{}\[\]":]', " ", clean)
+            clean = re.sub(r"\s+", " ", clean).strip()
+
+    return clean
 
 
 class LearningAnalyst:
@@ -136,6 +166,9 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         )
         diagnose = self._call_analyst(prompt_1, max_tokens=350)
         self._log.info("Diagnose erhalten: %d Zeichen", len(diagnose))
+
+        # Bereinige Diagnose — Gemini gibt manchmal JSON statt Text zurück
+        diagnose = _clean_diagnose(diagnose)
 
         # ── CALL 2: Signal-Gewichtungen (~200 Token Output) ───────────────
         prompt_2 = (
