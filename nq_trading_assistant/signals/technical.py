@@ -135,23 +135,44 @@ class TechnicalAnalyzer:
         if vwap is None or vwap == 0.0:
             return []
 
-        distance = price - vwap
-        abs_dist = abs(distance)
-        direction = Direction.BULLISH if distance > 0 else Direction.BEARISH
+        distance     = price - vwap
+        abs_dist     = abs(distance)
+        atr_approx   = _VWAP_WARN_POINTS * 2   # ~10 pts as ATR proxy
+        distance_atr = abs_dist / atr_approx if atr_approx > 0 else 0
 
-        # Confidence: rises with distance up to 20 pts, max 0.75
-        confidence = min(0.40 + abs_dist / 20.0 * 0.35, 0.75)
-
-        side_str = "above" if distance > 0 else "below"
-        desc = f"Price {side_str} VWAP by {abs_dist:.2f} pts (VWAP={vwap:.2f})"
-
-        if abs_dist > _VWAP_WARN_POINTS:
-            desc += " — extended, mean-reversion risk"
-            confidence = min(confidence + 0.10, 0.85)
+        if distance_atr < 0.5:
+            # Zone 1: nahe VWAP — Trend-Signal, niedrige Konfidenz
+            direction  = Direction.BULLISH if distance > 0 else Direction.BEARISH
+            confidence = 0.55
+            side_str   = "über" if distance > 0 else "unter"
+            desc = (
+                f"Preis {side_str} VWAP ({distance:+.1f} Pts) — nahe Fair Value"
+            )
+        elif distance_atr < 1.5:
+            # Zone 2: moderat entfernt — starkes Trend-Signal
+            direction  = Direction.BULLISH if distance > 0 else Direction.BEARISH
+            confidence = 0.75
+            side_str   = "über" if distance > 0 else "unter"
+            desc = (
+                f"Preis {side_str} VWAP ({distance:+.1f} Pts) — Trend bestätigt"
+            )
+        else:
+            # Zone 3: weit entfernt — Mean-Reversion Signal (Richtungsumkehr!)
+            # Preis weit unter VWAP → LONG erwarten; weit über → SHORT erwarten
+            direction  = Direction.BULLISH if distance < 0 else Direction.BEARISH
+            confidence = 0.65
+            side_str   = "unter" if distance < 0 else "über"
+            rev_dir    = "LONG" if distance < 0 else "SHORT"
+            desc = (
+                f"Preis EXTREM {side_str} VWAP ({distance:+.1f} Pts = "
+                f"{distance_atr:.1f}x ATR) — "
+                f"Mean Reversion {rev_dir} erwartet"
+            )
 
         return [_make_signal(
             VWAP_POSITION, direction, confidence, desc,
-            {"vwap": vwap, "distance_pts": round(distance, 2)},
+            {"vwap": vwap, "distance_pts": round(distance, 2),
+             "distance_atr": round(distance_atr, 2)},
         )]
 
     # ------------------------------------------------------------------

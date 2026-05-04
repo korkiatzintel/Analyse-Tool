@@ -654,6 +654,30 @@ class SignalEngine:
                 else:
                     self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_normal", 0.65)
 
+        # PREMARKET / LUNCH — blockiere alle Signale außerhalb RTH
+        time_of_day = ctx.get("time_of_day", "RTH_MID")
+        if time_of_day in ("PREMARKET", "LUNCH"):
+            blocked_reason = (
+                "PREMARKET — Trades nur während RTH (09:30-16:00 ET)"
+                if time_of_day == "PREMARKET"
+                else "LUNCH (13:00-14:00 ET) — kein Trading"
+            )
+            dummy = [
+                {"rank": i + 1, "direction": d, "confidence": 0.0,
+                 "signals": [], "trade_setup": None, "is_signal": False,
+                 "blocked_reason": blocked_reason}
+                for i, d in enumerate(["LONG", "SHORT", "LONG"])
+            ]
+            return {
+                "candidates":  dummy,
+                "best_signal": dummy[0],
+                "any_signal":  False,
+                "threshold":   self.threshold,
+                "ict_signals": {},
+                "reversal":    {"reversal_type": None, "direction": None,
+                                "confidence": 0.0, "signals": []},
+            }
+
         price  = ctx.get("last_price", 0) or 0
         atr    = compute_atr(ctx.get("bars_5m", [])) or _FALLBACK_ATR
         vwap   = ctx.get("session_vwap") or None
@@ -828,10 +852,20 @@ class SignalEngine:
             result.append({**s, "confidence": new_conf})
         return result
 
+    def _deduplicate_signals(self, signals: List[dict]) -> List[dict]:
+        """Remove duplicate signal types — keep highest confidence per type+direction."""
+        seen: dict = {}
+        for s in signals:
+            key = f"{s.get('type', '')}_{s.get('direction', '')}"
+            if key not in seen or s.get("confidence", 0) > seen[key].get("confidence", 0):
+                seen[key] = s
+        return list(seen.values())
+
     def _evaluate_direction(self, ctx: dict, direction: str) -> List[dict]:
         """Return all signals that agree with the given direction."""
         target_dirs = ["BULLISH", "LONG"] if direction == "LONG" else ["BEARISH", "SHORT"]
-        return [s for s in self._get_all_signals(ctx) if s.get("direction") in target_dirs]
+        raw = [s for s in self._get_all_signals(ctx) if s.get("direction") in target_dirs]
+        return self._deduplicate_signals(raw)
 
     def _evaluate_special_setups(self, ctx: dict) -> List[dict]:
         """Detect Mean Reversion and Gap Fill setups."""

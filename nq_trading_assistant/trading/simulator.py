@@ -14,7 +14,7 @@ TICK_SIZE             = 0.25
 TICK_VALUE_NQ         = 5.00
 MNQ_TICK_VALUE        = 0.50
 MIN_ENTRY_DISTANCE_TICKS = 8   # min 2 pts Abstand zwischen ähnlichen Entries
-COOLDOWN_MINUTES      = 5      # Pause nach Trade-Eröffnung
+COOLDOWN_MINUTES      = 10     # Pause nach Trade-Eröffnung
 
 
 @dataclass
@@ -112,11 +112,28 @@ class TradeSimulator:
         )
 
     def _get_time_of_day(self) -> str:
-        hour = datetime.utcnow().hour
-        if 13 <= hour < 14:    return "RTH_OPEN"
-        elif 14 <= hour < 19:  return "RTH_MID"
-        elif 19 <= hour < 21:  return "RTH_CLOSE"
-        else:                  return "PREMARKET"
+        now           = datetime.utcnow()
+        total_minutes = now.hour * 60 + now.minute
+
+        RTH_OPEN_START  = 13 * 60 + 30   # 13:30 UTC = 09:30 ET
+        RTH_OPEN_END    = 14 * 60 + 30   # 14:30 UTC = 10:30 ET
+        RTH_MID_END     = 17 * 60        # 17:00 UTC = 13:00 ET
+        LUNCH_END       = 18 * 60        # 18:00 UTC = 14:00 ET
+        RTH_CLOSE_START = 19 * 60        # 19:00 UTC = 15:00 ET
+        RTH_END         = 20 * 60        # 20:00 UTC = 16:00 ET
+
+        if total_minutes < RTH_OPEN_START or total_minutes >= RTH_END:
+            return "PREMARKET"
+        elif total_minutes < RTH_OPEN_END:
+            return "RTH_OPEN"
+        elif total_minutes < RTH_MID_END:
+            return "RTH_MID"
+        elif total_minutes < LUNCH_END:
+            return "LUNCH"
+        elif total_minutes < RTH_CLOSE_START:
+            return "RTH_PM"
+        else:
+            return "RTH_CLOSE"
 
     def open_trade(self, signal: dict, ctx: dict) -> Optional[str]:
         confidence = signal.get("confidence", 0)
@@ -139,6 +156,17 @@ class TradeSimulator:
 
         now = datetime.utcnow()
 
+        # ── PREMARKET / LUNCH Sperre ──────────────────────────────────────
+        time_of_day = self._get_time_of_day()
+        if time_of_day == "PREMARKET":
+            self._log.debug(
+                "Trade abgelehnt: PREMARKET — keine Trades vor RTH Open (09:30 ET)")
+            return None
+        if time_of_day == "LUNCH":
+            self._log.debug(
+                "Trade abgelehnt: LUNCH (13:00-14:00 ET) — keine Trades")
+            return None
+
         # ── FILTER 1: Max 1 offener Trade gleichzeitig ────────────────────
         open_trades = self.get_open_trades()
         if len(open_trades) >= 1:
@@ -160,9 +188,9 @@ class TradeSimulator:
                 entry_time    = datetime.fromisoformat(recent["timestamp_entry"])
                 minutes_since = (now - entry_time).total_seconds() / 60
                 if minutes_since < COOLDOWN_MINUTES:
-                    self._log.debug(
-                        "Trade abgelehnt: Cooldown aktiv (%.1f < %d Min)",
-                        minutes_since, COOLDOWN_MINUTES,
+                    self._log.info(
+                        "Cooldown aktiv: %.1f Min seit letztem Trade "
+                        "(%d Min benötigt)", minutes_since, COOLDOWN_MINUTES,
                     )
                     return None
             except Exception:
