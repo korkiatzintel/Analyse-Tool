@@ -104,6 +104,8 @@ def _init_ss() -> None:
         "w_order_flow":         50,
         "w_technical":          30,
         "contract_type":        "MNQ (Micro)",
+        "mnq_contracts":        5,
+        "eur_usd_rate":         0.92,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -201,6 +203,18 @@ def _sidebar(state: Optional[dict]) -> None:
         st.session_state["w_order_flow"] = of_w
         st.session_state["w_technical"]  = ta_w
         st.caption(f"Macro (auto): **{ma_w}%**")
+
+        st.markdown("**Trade Journal**")
+        st.session_state["mnq_contracts"] = st.number_input(
+            "MNQ Kontrakte", min_value=1, max_value=20,
+            value=st.session_state["mnq_contracts"], step=1,
+            help="Anzahl MNQ Kontrakte für P&L Berechnung",
+        )
+        st.session_state["eur_usd_rate"] = st.number_input(
+            "EUR/USD Rate", min_value=0.80, max_value=1.20,
+            value=st.session_state["eur_usd_rate"], step=0.01, format="%.2f",
+            help="Wechselkurs für EUR Umrechnung",
+        )
 
         st.divider()
 
@@ -1018,65 +1032,111 @@ def main() -> None:
     # ══════════════════════════════════════════════════════════════════════
 
     with tab2:
-        sim_stats = state.get("sim_stats", {})
+        sim_stats  = state.get("sim_stats", {})
+        contracts  = st.session_state.get("mnq_contracts", 5)
+        eur_rate   = st.session_state.get("eur_usd_rate", 0.92)
+        mnq_tick   = 0.50  # $ per tick per MNQ contract
 
         if sim_stats.get("total", 0) > 0:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Trades gesamt", sim_stats["total"])
+            # ── Gesamt-Statistik (5 Spalten) ──────────────────────────────
+            total_ticks = sim_stats.get("total_pnl_ticks", 0)
+            total_usd   = total_ticks * mnq_tick * contracts
+            total_eur   = total_usd * eur_rate
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Trades", sim_stats["total"])
             c2.metric(
                 "Win-Rate", f"{sim_stats['win_rate']}%",
-                delta=f"{sim_stats['win_rate'] - 65:.1f}% vs Ziel",
+                delta=f"{sim_stats['win_rate'] - 65:.1f}% vs Ziel 65%",
             )
-            c3.metric("Avg P&L", f"{sim_stats['avg_pnl_points']:+.1f} Punkte")
-            c4.metric("Gesamt P&L", f"${sim_stats['total_pnl_usd']:+.0f}")
+            c3.metric("Gesamt Ticks", f"{total_ticks:+}")
+            c4.metric("Gesamt USD",   f"${total_usd:+.0f}")
+            c5.metric("Gesamt EUR",   f"€{total_eur:+.0f}")
 
-            # Offene Trades
+            # ── Offene Trades ──────────────────────────────────────────────
             open_trades = state.get("open_trades", [])
             if open_trades:
                 st.subheader(f"🔄 Offene Trades ({len(open_trades)})")
                 for t in open_trades:
-                    direction_icon = "▲" if t["direction"] == "LONG" else "▼"
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.markdown(f"{direction_icon} **{t['direction']}**")
-                    col2.metric("Entry", f"{t['entry_price']:.2f}")
-                    col3.metric("SL",    f"{t['stop_loss']:.2f}")
-                    col4.metric("TP1",   f"{t['take_profit_1']:.2f}")
+                    entry     = t.get("entry_price", 0)
+                    sl        = t.get("stop_loss", 0)
+                    tp1       = t.get("take_profit_1", 0)
+                    sl_t      = int(abs(sl - entry) / 0.25)  if sl  and entry else 0
+                    tp1_t     = int(abs(tp1 - entry) / 0.25) if tp1 and entry else 0
+                    dir_icon  = "▲" if t["direction"] == "LONG" else "▼"
+                    mode      = t.get("trade_mode", "TREND")
+                    mode_icon = "🔄" if mode == "REVERSAL" else "📈"
+
+                    col1, col2, col3, col4, col5 = st.columns(5)
+                    col1.markdown(f"{dir_icon} **{t['direction']}** {mode_icon}")
+                    col2.metric("Entry",     f"{entry:.2f}")
+                    col3.metric("SL",        f"{sl:.2f} ({sl_t}T)")
+                    col4.metric("TP1",       f"{tp1:.2f} ({tp1_t}T)")
+                    col5.metric("Konfidenz", f"{t.get('confidence', 0):.0%}")
                     st.caption(
-                        f"Signale: {', '.join(t['active_signals'])} | "
-                        f"Konfidenz: {t['confidence']:.0%} | "
-                        f"Einstieg: {t['timestamp_entry'][:16]}"
+                        f"Signale: {', '.join(t.get('active_signals', []))} | "
+                        f"Einstieg: {t.get('timestamp_entry', '')[:16]}"
                     )
                     st.divider()
 
-            # Geschlossene Trades
+            # ── Geschlossene Trades ────────────────────────────────────────
             recent = state.get("recent_trades", [])
             if recent:
                 st.subheader("📋 Letzte abgeschlossene Trades")
                 for t in recent:
-                    outcome = t.get("outcome", "?")
-                    pnl     = t.get("pnl_points", 0)
-                    if outcome == "WIN":
-                        st.success(
-                            f"✅ {t['direction']} | Entry {t['entry_price']:.2f} → "
-                            f"Exit {t.get('exit_price', 0):.2f} | "
-                            f"+{pnl:.1f} Punkte | {t.get('exit_reason')} | "
-                            f"{t.get('duration_minutes', 0):.0f} Min"
-                        )
-                    elif outcome == "LOSS":
-                        st.error(
-                            f"❌ {t['direction']} | Entry {t['entry_price']:.2f} → "
-                            f"Exit {t.get('exit_price', 0):.2f} | "
-                            f"{pnl:.1f} Punkte | SL | "
-                            f"{t.get('duration_minutes', 0):.0f} Min"
-                        )
-                    else:
-                        st.info(
-                            f"⏱️ {t['direction']} | {pnl:+.1f} Punkte | "
-                            f"TIMEOUT | {t.get('duration_minutes', 0):.0f} Min"
-                        )
-                    st.caption(f"Signale: {', '.join(t.get('active_signals', []))}")
+                    direction = t.get("direction", "?")
+                    entry     = t.get("entry_price", 0)
+                    exit_p    = t.get("exit_price", 0)
+                    outcome   = t.get("outcome", "?")
+                    exit_r    = t.get("exit_reason", "?")
+                    duration  = t.get("duration_minutes", 0)
 
-            # Killzone Performance
+                    # Ticks aus Backend oder lokal berechnen
+                    pnl_ticks = t.get("pnl_ticks") or (
+                        int(((exit_p - entry) if direction == "LONG"
+                             else (entry - exit_p)) / 0.25)
+                        if entry and exit_p else 0
+                    )
+                    sl_t  = t.get("sl_ticks")  or (
+                        int(abs(t.get("stop_loss", 0) - entry) / 0.25) if entry else 0
+                    )
+                    tp1_t = t.get("tp1_ticks") or (
+                        int(abs(t.get("take_profit_1", 0) - entry) / 0.25) if entry else 0
+                    )
+
+                    pnl_usd = pnl_ticks * mnq_tick * contracts
+                    pnl_eur = pnl_usd * eur_rate
+
+                    icon = "✅" if outcome == "WIN" else ("❌" if outcome == "LOSS" else "⏱️")
+                    msg  = (
+                        f"{icon} {direction} | {exit_r} | "
+                        f"{pnl_ticks:+} Ticks | ${pnl_usd:+.0f} / €{pnl_eur:+.0f}"
+                    )
+                    if outcome == "WIN":
+                        st.success(msg)
+                    elif outcome == "LOSS":
+                        st.error(msg)
+                    else:
+                        st.info(msg)
+
+                    col1, col2, col3, col4, col5 = st.columns(5)
+                    col1.metric("Entry",     f"{entry:.2f}")
+                    col2.metric("Exit",      f"{exit_p:.2f}" if exit_p else "offen")
+                    col3.metric("SL Abstand", f"{sl_t} Ticks")
+                    col4.metric("TP1 Ziel",  f"{tp1_t} Ticks")
+                    col5.metric("Dauer",     f"{duration:.0f} Min")
+
+                    sigs      = t.get("active_signals", [])
+                    mode      = t.get("trade_mode", "TREND")
+                    mode_icon = "🔄" if mode == "REVERSAL" else "📈"
+                    st.caption(
+                        f"{mode_icon} {mode} | "
+                        f"Conf: {t.get('confidence', 0):.0%} | "
+                        f"Signale: {', '.join(sigs[:3])}"
+                    )
+                    st.divider()
+
+            # ── Killzone Performance ───────────────────────────────────────
             kz_stats = sim_stats.get("win_rate_by_killzone", {})
             if kz_stats:
                 st.subheader("🎯 Killzone Performance")
@@ -1090,7 +1150,7 @@ def main() -> None:
                 )
                 col_kz2.metric("Außerhalb Killzone", f"{kz_out:.1f}%")
 
-            # Win-Rate nach Signal-Typ
+            # ── Signal Performance ─────────────────────────────────────────
             best_signals = sim_stats.get("best_signal_types", {})
             if best_signals:
                 st.subheader("🏆 Signal Performance")

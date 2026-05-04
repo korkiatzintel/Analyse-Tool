@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -9,8 +10,11 @@ from datetime import datetime
 TRADES_FILE  = Path(__file__).parent.parent / "logs" / "simulated_trades.json"
 WEIGHTS_FILE = Path(__file__).parent.parent / "logs" / "signal_weights.json"
 
-TICK_SIZE      = 0.25
-TICK_VALUE_NQ  = 5.00
+TICK_SIZE             = 0.25
+TICK_VALUE_NQ         = 5.00
+MNQ_TICK_VALUE        = 0.50
+MIN_ENTRY_DISTANCE_TICKS = 8   # min 2 pts Abstand zwischen ähnlichen Entries
+COOLDOWN_MINUTES      = 5      # Pause nach Trade-Eröffnung
 
 
 @dataclass
@@ -57,6 +61,7 @@ class SimulatedTrade:
 class TradeSimulator:
     def __init__(self, strategy_config=None):
         self._cfg = strategy_config
+        self._log = logging.getLogger(__name__)
         TRADES_FILE.parent.mkdir(exist_ok=True)
         self._trades  = self._load_trades()
         self._weights = self._load_weights()
@@ -128,84 +133,126 @@ class TradeSimulator:
         if not ts:
             return None
 
-        # Minimum TP1 filter
+        entry_price = ts.get("entry_price", 0) or ctx.get("price", 0) or ctx.get("last_price", 0)
+        if entry_price == 0:
+            return None
+
+        now = datetime.utcnow()
+
+        # ── FILTER 1: Max 1 offener Trade gleichzeitig ────────────────────
+        open_trades = self.get_open_trades()
+        if len(open_trades) >= 1:
+            self._log.debug(
+                "Trade abgelehnt: Bereits offener Trade %s (%s)",
+                open_trades[0]["trade_id"], open_trades[0]["direction"],
+            )
+            return None
+
+        # ── FILTER 2: Cooldown nach letztem Trade (5 Min) ─────────────────
+        all_recent = sorted(
+            self._trades,
+            key=lambda x: x.get("timestamp_entry", ""),
+            reverse=True,
+        )[:5]
+
+        for recent in all_recent:
+            try:
+                entry_time    = datetime.fromisoformat(recent["timestamp_entry"])
+                minutes_since = (now - entry_time).total_seconds() / 60
+                if minutes_since < COOLDOWN_MINUTES:
+                    self._log.debug(
+                        "Trade abgelehnt: Cooldown aktiv (%.1f < %d Min)",
+                        minutes_since, COOLDOWN_MINUTES,
+                    )
+                    return None
+            except Exception:
+                pass
+
+        # ── FILTER 3: Preisähnlichkeit — kein Duplikat in 15 Min ─────────
+        for recent in all_recent[:3]:
+            recent_entry = recent.get("entry_price", 0)
+            recent_dir   = recent.get("direction", "")
+            if recent_entry == 0:
+                continue
+            price_diff_ticks = abs(entry_price - recent_entry) / TICK_SIZE
+            if recent_dir == direction and price_diff_ticks < MIN_ENTRY_DISTANCE_TICKS:
+                try:
+                    entry_time    = datetime.fromisoformat(recent["timestamp_entry"])
+                    minutes_since = (now - entry_time).total_seconds() / 60
+                    if minutes_since < 15:
+                        self._log.debug(
+                            "Trade abgelehnt: Duplikat — %s @ %.2f vs %.2f (%.0f Ticks)",
+                            direction, entry_price, recent_entry, price_diff_ticks,
+                        )
+                        return None
+                except Exception:
+                    pass
+
+        # ── Minimum TP1 Filter (80 Ticks) ─────────────────────────────────
         tp1_ticks = ts.get("take_profit_1_ticks", 0)
         min_tp1   = (
             self._cfg.get("RISK_MANAGEMENT", "min_tp1_ticks", 80)
             if self._cfg else 80
         )
         if tp1_ticks < min_tp1:
-            import logging
-            logging.getLogger(__name__).debug(
-                "Trade abgelehnt: TP1 nur %d Ticks (Minimum: %d Ticks = %d Punkte)",
-                tp1_ticks, min_tp1, min_tp1 // 4,
+            self._log.debug(
+                "Trade abgelehnt: TP1 nur %d Ticks (Minimum %d)", tp1_ticks, min_tp1,
             )
             return None
 
-        # Confidence boost for large TP setups
-        bonus_t1 = (
-            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_1", 120)
-            if self._cfg else 120
-        )
-        bonus_t2 = (
-            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_2", 200)
-            if self._cfg else 200
-        )
-        factor_1 = (
-            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_1", 1.05)
-            if self._cfg else 1.05
-        )
-        factor_2 = (
-            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_2", 1.10)
-            if self._cfg else 1.10
-        )
+        # ── Confidence Boost für große TP Setups ──────────────────────────
+        bonus_t1 = self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_1", 120) if self._cfg else 120
+        bonus_t2 = self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_2", 200) if self._cfg else 200
+        factor_1 = self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_1", 1.05)   if self._cfg else 1.05
+        factor_2 = self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_2", 1.10)   if self._cfg else 1.10
         if tp1_ticks >= bonus_t2:
             confidence = min(0.95, confidence * factor_2)
         elif tp1_ticks >= bonus_t1:
             confidence = min(0.95, confidence * factor_1)
 
-        # Bias filter — no trades against the prevailing bias
+        # ── Bias Filter (Reversal Trades bypass) ──────────────────────────
         bias      = ctx.get("bias") or {}
         bias_dir  = bias.get("direction", "NEUTRAL")
         bias_prob = bias.get("probability", 50)
-        min_bias  = (
-            self._cfg.get("BIAS_PARAMETER", "min_bias_probability", 0.65) * 100
-            if self._cfg else 65
+        is_reversal = signal.get("reversal_info", {}).get("reversal_type") in (
+            "CONFIRMED", "POTENTIAL"
         )
-        if bias_dir != "NEUTRAL" and bias_prob >= min_bias:
-            if direction != bias_dir:
-                return None
+        if not is_reversal:
+            min_bias = (
+                self._cfg.get("BIAS_PARAMETER", "min_bias_probability", 0.65) * 100
+                if self._cfg else 65
+            )
+            if bias_dir != "NEUTRAL" and bias_prob >= min_bias:
+                if direction != bias_dir:
+                    self._log.debug(
+                        "Trade abgelehnt: Gegen Bias (%s %.0f%%)", bias_dir, bias_prob,
+                    )
+                    return None
 
-        # Max 1 open trade at a time; no duplicate direction
-        open_trades = self.get_open_trades()
-        if len(open_trades) >= 1:
-            return None
-
-        ict = ctx.get("ict_signals", {})
-        ms  = ict.get("market_structure", {})
-        ms_str = (
-            f"{ms.get('type','?')}_{ms.get('direction','?')}" if ms else None
-        )
+        # ── Trade erstellen ────────────────────────────────────────────────
+        ict    = ctx.get("ict_signals", {})
+        ms     = ict.get("market_structure", {})
+        ms_str = f"{ms.get('type','?')}_{ms.get('direction','?')}" if ms else None
 
         trade = SimulatedTrade(
-            trade_id        = str(uuid.uuid4())[:8],
-            timestamp_entry = datetime.utcnow().isoformat(),
-            direction       = direction,
-            entry_price     = ts.get("entry_price", ctx.get("price", 0)),
-            stop_loss       = ts.get("stop_loss_price", 0),
-            take_profit_1   = ts.get("take_profit_1_price", 0),
-            take_profit_2   = ts.get("take_profit_2_price", 0),
-            confidence      = confidence,
-            active_signals  = [s.get("type") for s in signal.get("signals", [])],
-            signal_details  = signal.get("signals", []),
-            vix             = ctx.get("vix", 0),
-            vwap            = ctx.get("session_vwap") or ctx.get("vwap", 0),
-            session_high    = ctx.get("session_high", 0) or 0,
-            session_low     = ctx.get("session_low", 0)  or 0,
-            atr             = signal.get("atr", 0) or ts.get("atr_used", 0),
-            vix_regime      = ctx.get("vix_regime", "normal"),
-            time_of_day     = self._get_time_of_day(),
-            bias_direction  = bias_dir,
+            trade_id         = str(uuid.uuid4())[:8],
+            timestamp_entry  = now.isoformat(),
+            direction        = direction,
+            entry_price      = entry_price,
+            stop_loss        = ts.get("stop_loss_price", 0),
+            take_profit_1    = ts.get("take_profit_1_price", 0),
+            take_profit_2    = ts.get("take_profit_2_price", 0),
+            confidence       = confidence,
+            active_signals   = [s.get("type") for s in signal.get("signals", [])],
+            signal_details   = signal.get("signals", []),
+            vix              = ctx.get("vix", 0),
+            vwap             = ctx.get("session_vwap") or ctx.get("vwap", 0),
+            session_high     = ctx.get("session_high", 0) or 0,
+            session_low      = ctx.get("session_low",  0) or 0,
+            atr              = signal.get("atr", 0) or ts.get("atr_used", 0),
+            vix_regime       = ctx.get("vix_regime", "normal"),
+            time_of_day      = self._get_time_of_day(),
+            bias_direction   = bias_dir,
             bias_probability = bias_prob,
             killzone         = ict.get("active_killzone"),
             ict_score        = ict.get("ict_score", 0),
@@ -213,13 +260,15 @@ class TradeSimulator:
             market_structure = ms_str,
             liquidity_levels = len(ict.get("liquidity_levels", [])),
             fvg_count        = len(ict.get("fvg_levels", [])),
-            bias_1h          = (ctx.get("ict_signals", {})
-                                .get("htf_bias", {})
-                                .get("direction", "NEUTRAL")),
+            bias_1h          = ict.get("htf_bias", {}).get("direction", "NEUTRAL"),
         )
 
         self._trades.append(asdict(trade))
         self._save_trades()
+        self._log.info(
+            "Trade eröffnet %s: %s @ %.2f | Konf %.0f%% | TP1 %d Ticks",
+            trade.trade_id, direction, entry_price, confidence * 100, tp1_ticks,
+        )
         return trade.trade_id
 
     def update_open_trades(self, current_price: float):
@@ -293,11 +342,41 @@ class TradeSimulator:
 
     def get_closed_trades(self, limit: int = 50) -> list:
         closed = [t for t in self._trades if t.get("outcome") is not None]
-        return sorted(
+        sorted_trades = sorted(
             closed,
             key=lambda x: x.get("timestamp_exit", ""),
             reverse=True,
         )[:limit]
+        return [
+            {**t, **self._format_trade_display(t)}
+            for t in sorted_trades
+        ]
+
+    def _format_trade_display(self, trade: dict) -> dict:
+        entry     = trade.get("entry_price", 0)
+        exit_p    = trade.get("exit_price",  0)
+        sl        = trade.get("stop_loss",    0)
+        tp1       = trade.get("take_profit_1", 0)
+        tp2       = trade.get("take_profit_2", 0)
+        direction = trade.get("direction", "LONG")
+
+        pnl_ticks = 0
+        if entry > 0 and exit_p > 0:
+            pnl_pts   = (exit_p - entry) if direction == "LONG" else (entry - exit_p)
+            pnl_ticks = int(pnl_pts / TICK_SIZE)
+
+        sl_ticks  = int(abs(sl  - entry) / TICK_SIZE) if sl  and entry else 0
+        tp1_ticks = int(abs(tp1 - entry) / TICK_SIZE) if tp1 and entry else 0
+        tp2_ticks = int(abs(tp2 - entry) / TICK_SIZE) if tp2 and entry else 0
+
+        return {
+            "pnl_ticks":  pnl_ticks,
+            "sl_ticks":   sl_ticks,
+            "tp1_ticks":  tp1_ticks,
+            "tp2_ticks":  tp2_ticks,
+            "risk_usd_mnq": round(sl_ticks  * MNQ_TICK_VALUE, 2),
+            "tp1_usd_mnq":  round(tp1_ticks * MNQ_TICK_VALUE, 2),
+        }
 
     def get_stats(self) -> dict:
         closed = [t for t in self._trades if t.get("outcome") is not None]
@@ -318,6 +397,9 @@ class TradeSimulator:
             "avg_pnl_points":   round(sum(t["pnl_points"] for t in closed) / len(closed), 2),
             "avg_pnl_usd":      round(sum(t["pnl_usd_nq"] for t in closed) / len(closed), 2),
             "total_pnl_usd":    round(sum(t["pnl_usd_nq"] for t in closed), 2),
+            "total_pnl_ticks":  sum(
+                int((t["pnl_points"] or 0) / TICK_SIZE) for t in closed
+            ),
             "best_signal_types":         self._best_signals(closed),
             "worst_signal_types":        self._worst_signals(closed),
             "win_rate_by_regime":        self._stats_by_regime(closed),
