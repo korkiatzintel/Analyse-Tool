@@ -35,6 +35,8 @@ from signals.free_signals import (
     FreeMarketAnalyzer,
     _VIX_HIGH,
 )
+from signals.ict_engine import ICTSignalEngine
+from signals.reversal_engine import ReversalEngine
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,8 @@ _RISK_REWARD_T1      = 1.5    # Target 1 = 1.5 × risk
 _RISK_REWARD_T2      = 2.5    # Target 2 = 2.5 × risk
 _FALLBACK_ATR        = 8.0    # NQ points — used when ATR unavailable
 _LIQUIDITY_CLUSTER_N = 5      # top N price levels for cluster entry zone
+_MIN_TP1_TICKS       = 80     # minimum TP1 ticks (80 × 0.25 = 20 pts = $400 NQ)
+_MIN_TP1_POINTS      = _MIN_TP1_TICKS * 0.25
 
 
 class TradeSetup:
@@ -97,11 +101,34 @@ class TradeSetup:
             take_profit_1 = round(entry - sl_distance * 1.5, 2)
             take_profit_2 = round(entry - sl_distance * 2.5, 2)
 
+        tp1_ticks = round(abs(take_profit_1 - entry) / tick)
+
+        # Ensure TP1 >= minimum ticks; expand SL symmetrically if needed
+        tp_adjusted = False
+        if tp1_ticks < _MIN_TP1_TICKS:
+            min_sl = round(round(max(_MIN_TP1_POINTS / _RISK_REWARD_T1,
+                                     atr * 0.5) / tick) * tick, 2)
+            sl_distance = min_sl
+            if direction == "LONG":
+                stop_loss     = round(entry - sl_distance, 2)
+                take_profit_1 = round(entry + sl_distance * _RISK_REWARD_T1, 2)
+                take_profit_2 = round(entry + sl_distance * _RISK_REWARD_T2, 2)
+            else:
+                stop_loss     = round(entry + sl_distance, 2)
+                take_profit_1 = round(entry - sl_distance * _RISK_REWARD_T1, 2)
+                take_profit_2 = round(entry - sl_distance * _RISK_REWARD_T2, 2)
+            tp1_ticks   = round(abs(take_profit_1 - entry) / tick)
+            tp_adjusted = True
+
+        # Reject setup if TP1 still below minimum (ATR too small)
+        if tp1_ticks < _MIN_TP1_TICKS:
+            return None
+
         sl_ticks  = round(sl_distance  / tick)
         tp1_ticks = round(abs(take_profit_1 - entry) / tick)
         tp2_ticks = round(abs(take_profit_2 - entry) / tick)
 
-        return {
+        setup = {
             "direction":             direction,
             "entry_price":           entry,
 
@@ -121,10 +148,17 @@ class TradeSetup:
             "take_profit_2_usd_nq":  round(tp2_ticks * self.NQ_TICK_VALUE,  2),
             "take_profit_2_usd_mnq": round(tp2_ticks * self.MNQ_TICK_VALUE, 2),
 
-            "risk_reward_tp1":       1.5,
-            "risk_reward_tp2":       2.5,
+            "risk_reward_tp1":       _RISK_REWARD_T1,
+            "risk_reward_tp2":       _RISK_REWARD_T2,
             "atr_used":              round(atr, 2),
+            "meets_min_ticks":       True,
         }
+        if tp_adjusted:
+            setup["tp_adjusted"] = True
+            setup["tp_adjustment_reason"] = (
+                f"TP1 war unter {_MIN_TP1_TICKS} Ticks — auf Minimum angepasst"
+            )
+        return setup
 
 
 @dataclass
@@ -163,12 +197,18 @@ class SignalEngine:
         CALENDAR_FILTER: 0.0,
     }
 
-    def __init__(self) -> None:
+    def __init__(self, strategy_config=None) -> None:
         self._of_analyzer   = OrderFlowAnalyzer()
         self._ta_analyzer   = TechnicalAnalyzer()
         self._free_analyzer = FreeMarketAnalyzer()
+        self._ict           = ICTSignalEngine()
+        self._reversal      = ReversalEngine()
         self.trade_setup    = TradeSetup()
-        self.threshold      = _MIN_CONFIDENCE
+        self._cfg           = strategy_config
+        self.threshold      = (
+            strategy_config.get("KONFIDENZ_SCHWELLEN", "min_confidence_normal", _MIN_CONFIDENCE)
+            if strategy_config else _MIN_CONFIDENCE
+        )
         self._learned_weights: Dict[str, float] = {}
         self._weights_mtime: float = 0.0
         self._reload_weights()
@@ -600,6 +640,22 @@ class SignalEngine:
         """
         self._reload_weights()
 
+        # Dynamic threshold from config (VIX-aware)
+        vix_regime = ctx.get("vix_regime", "normal")
+        if self._cfg:
+            if vix_regime in ("extreme", "EXTREME"):
+                self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_vix_extreme", 0.80)
+            elif vix_regime in ("high", "HIGH"):
+                self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_vix_high", 0.72)
+            else:
+                time_of_day = ctx.get("time_of_day", "RTH_MID")
+                if time_of_day == "RTH_OPEN":
+                    self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_rth_open", 0.60)
+                elif time_of_day == "RTH_CLOSE":
+                    self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_rth_close", 0.70)
+                else:
+                    self.threshold = self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_normal", 0.65)
+
         price  = ctx.get("last_price", 0) or 0
         atr    = compute_atr(ctx.get("bars_5m", [])) or _FALLBACK_ATR
         vwap   = ctx.get("session_vwap") or None
@@ -672,17 +728,116 @@ class SignalEngine:
             ),
         })
 
-        # Bias filter — suppress signals against the prevailing bias
-        bias           = ctx.get("bias", {})
-        bias_direction = bias.get("direction", "NEUTRAL")
-        bias_prob      = bias.get("probability", 50)
-        if bias_direction != "NEUTRAL" and bias_prob >= 65:
-            for candidate in candidates:
-                if candidate["direction"] != bias_direction:
-                    candidate["is_signal"]       = False
-                    candidate["blocked_reason"]  = (
+        # ── Reversal Engine ───────────────────────────────────────────────
+        reversal = self._reversal.analyze(
+            ctx.get("bars_5m",  []),
+            ctx.get("bars_15m", []),
+            ctx,
+        )
+        ctx["reversal"] = reversal
+
+        bias                = ctx.get("bias", {})
+        bias_direction      = bias.get("direction", "NEUTRAL")
+        bias_prob           = bias.get("probability", 50)
+        reversal_type       = reversal.get("reversal_type")
+        reversal_dir        = reversal.get("direction")
+        reversal_confidence = reversal.get("confidence", 0.0)
+
+        min_bias_prob = (
+            self._cfg.get("BIAS_PARAMETER", "min_bias_probability", 0.70) * 100
+            if self._cfg else 70
+        )
+        min_rev_conf = (
+            self._cfg.get("REVERSAL_PARAMETER", "min_reversal_confidence", 0.50)
+            if self._cfg else 0.50
+        )
+
+        for candidate in candidates:
+            cand_dir = candidate["direction"]
+
+            # MODUS 2: Wendepunkt erkannt — Bias-Filter aufgehoben
+            if (reversal_type in ("CONFIRMED", "POTENTIAL")
+                    and reversal_confidence >= min_rev_conf
+                    and reversal_dir == cand_dir):
+                if reversal_type == "CONFIRMED":
+                    conf_bonus = (
+                        self._cfg.get("REVERSAL_PARAMETER",
+                                      "confirmed_confidence_bonus", 1.20)
+                        if self._cfg else 1.20
+                    )
+                else:
+                    conf_bonus = (
+                        self._cfg.get("REVERSAL_PARAMETER",
+                                      "potential_confidence_bonus", 1.10)
+                        if self._cfg else 1.10
+                    )
+                candidate["confidence"] = round(
+                    min(0.95, candidate["confidence"] * conf_bonus), 3
+                )
+                if candidate["confidence"] >= self.threshold:
+                    candidate["is_signal"] = True
+                candidate["trade_mode"]    = "REVERSAL"
+                candidate["reversal_info"] = reversal
+
+            # MODUS 1: Klarer Trend — strenger Bias-Filter (70%)
+            elif bias_direction != "NEUTRAL" and bias_prob >= min_bias_prob:
+                if cand_dir != bias_direction:
+                    candidate["is_signal"]      = False
+                    candidate["blocked_reason"] = (
                         f"Gegen Markt-Bias "
                         f"({bias_direction} {bias_prob:.0f}%)"
+                    )
+                candidate["trade_mode"] = "TREND"
+
+            # MODUS 3: Neutraler Markt — 75% Konfidenz erforderlich
+            else:
+                if candidate.get("is_signal") and candidate["confidence"] < 0.75:
+                    candidate["is_signal"]      = False
+                    candidate["blocked_reason"] = (
+                        "Neutraler Markt — 75% Konfidenz erforderlich"
+                    )
+                candidate["trade_mode"] = "NEUTRAL"
+
+        # ICT analysis — FVG / Order Blocks / Market Structure / Killzones / HTF Bias
+        ict_signals = self._ict.analyze(
+            ctx.get("bars_5m",  []),
+            ctx.get("bars_15m", []),
+            ctx.get("bars_1h",  []),
+        )
+        ict_score       = ict_signals.get("ict_score", 0.0)
+        killzone_bonus  = ict_signals.get("killzone_bonus", 1.0)
+        killzone        = ict_signals.get("active_killzone")
+
+        # Apply killzone bonus and inject ICT_CONFLUENCE signal
+        for candidate in candidates:
+            if candidate.get("is_signal") or candidate["confidence"] > 0.3:
+                candidate["confidence"] = round(
+                    min(0.99, candidate["confidence"] * killzone_bonus), 3
+                )
+                if candidate["confidence"] >= self.threshold:
+                    candidate["is_signal"] = True
+
+            if ict_score > 0.3:
+                candidate.setdefault("signals", []).append({
+                    "type":        "ICT_CONFLUENCE",
+                    "direction":   candidate["direction"],
+                    "confidence":  round(ict_score, 3),
+                    "description": " | ".join(ict_signals.get("ict_reasons", [])),
+                    "metadata": {
+                        "killzone":         killzone,
+                        "market_structure": ict_signals.get("market_structure"),
+                        "order_blocks":     len(ict_signals.get("order_blocks", [])),
+                        "fvg_count":        len(ict_signals.get("fvg_levels", [])),
+                    },
+                })
+
+        # Outside killzones: require ≥80% confidence to fire a signal
+        if not killzone:
+            for candidate in candidates:
+                if candidate.get("is_signal") and candidate["confidence"] < 0.80:
+                    candidate["is_signal"]      = False
+                    candidate["blocked_reason"] = (
+                        "Außerhalb ICT Killzone — Konfidenz < 80% benötigt"
                     )
 
         candidates.sort(key=lambda x: x["confidence"], reverse=True)
@@ -691,24 +846,47 @@ class SignalEngine:
 
         best = candidates[0]
         return {
-            "candidates": candidates,
-            "best_signal": best,
-            "any_signal": any(c["is_signal"] for c in candidates),
-            "threshold": self.threshold,
+            "candidates":   candidates,
+            "best_signal":  best,
+            "any_signal":   any(c["is_signal"] for c in candidates),
+            "threshold":    self.threshold,
+            "ict_signals":  ict_signals,
+            "reversal":     reversal,
         }
 
     def _get_all_signals(self, ctx: dict) -> List[dict]:
         """Return all non-blocking signals as dicts, VIX dampening + learned weights applied."""
+        vix_high_thresh = (
+            self._cfg.get("VIX_REGIME_GRENZEN", "vix_normal_threshold", _VIX_HIGH)
+            if self._cfg else _VIX_HIGH
+        )
+        vix_penalty = (
+            self._cfg.get("VIX_REGIME_GRENZEN", "vix_penalty_high", 0.80)
+            if self._cfg else 0.80
+        )
         free_signals = self._free_analyzer.analyze(ctx)
-        if ctx.get("vix", 0.0) > _VIX_HIGH:
-            free_signals = _dampen_confidence(free_signals, factor=0.80)
+        if ctx.get("vix", 0.0) > vix_high_thresh:
+            free_signals = _dampen_confidence(free_signals, factor=vix_penalty)
         ta_signals = self._ta_analyzer.analyze(_free_snap_to_data_snap(ctx))
         signals = [
             _signal_to_dict(s)
             for s in (free_signals + ta_signals)
             if not s.metadata.get("block")
         ]
+        signals = self._apply_strategy_weights(signals)
         return self._apply_learned_weights(signals, ctx)
+
+    def _apply_strategy_weights(self, signals: List[dict]) -> List[dict]:
+        """Apply strategy_config signal weights if available."""
+        if not self._cfg:
+            return signals
+        result = []
+        for s in signals:
+            sig_type = s.get("type", "")
+            weight   = self._cfg.get("SIGNAL_GEWICHTUNGEN", sig_type, 1.0)
+            new_conf = round(min(0.99, s.get("confidence", 0.0) * weight), 3)
+            result.append({**s, "confidence": new_conf})
+        return result
 
     def _evaluate_direction(self, ctx: dict, direction: str) -> List[dict]:
         """Return all signals that agree with the given direction."""

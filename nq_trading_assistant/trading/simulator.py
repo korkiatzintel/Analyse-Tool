@@ -44,10 +44,22 @@ class SimulatedTrade:
     max_favorable_excursion: Optional[float] = None
     bias_direction:          str             = "NEUTRAL"
     bias_probability:        float           = 50.0
+    # ICT context at entry
+    killzone:                Optional[str]   = None
+    ict_score:               Optional[float] = None
+    order_blocks_active:     Optional[int]   = None
+    market_structure:        Optional[str]   = None
+    liquidity_levels:        Optional[int]   = None
+    bias_1h:                 Optional[str]   = None
+    fvg_count:               Optional[int]   = None
+    # Reversal / trade mode context
+    trade_mode:              Optional[str]   = None
+    reversal_type:           Optional[str]   = None
 
 
 class TradeSimulator:
-    def __init__(self):
+    def __init__(self, strategy_config=None):
+        self._cfg = strategy_config
         TRADES_FILE.parent.mkdir(exist_ok=True)
         self._trades  = self._load_trades()
         self._weights = self._load_weights()
@@ -108,18 +120,62 @@ class TradeSimulator:
         confidence = signal.get("confidence", 0)
         direction  = signal.get("direction", "NEUTRAL")
 
-        if confidence < 0.65 or direction == "NEUTRAL":
+        min_conf = (
+            self._cfg.get("KONFIDENZ_SCHWELLEN", "min_confidence_normal", 0.65)
+            if self._cfg else 0.65
+        )
+        if confidence < min_conf or direction == "NEUTRAL":
             return None
 
         ts = signal.get("trade_setup") or {}
         if not ts:
             return None
 
+        # Minimum TP1 filter
+        tp1_ticks = ts.get("take_profit_1_ticks", 0)
+        min_tp1   = (
+            self._cfg.get("RISK_MANAGEMENT", "min_tp1_ticks", 80)
+            if self._cfg else 80
+        )
+        if tp1_ticks < min_tp1:
+            import logging
+            logging.getLogger(__name__).debug(
+                "Trade abgelehnt: TP1 nur %d Ticks (Minimum: %d Ticks = %d Punkte)",
+                tp1_ticks, min_tp1, min_tp1 // 4,
+            )
+            return None
+
+        # Confidence boost for large TP setups
+        bonus_t1 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_1", 120)
+            if self._cfg else 120
+        )
+        bonus_t2 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_threshold_2", 200)
+            if self._cfg else 200
+        )
+        factor_1 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_1", 1.05)
+            if self._cfg else 1.05
+        )
+        factor_2 = (
+            self._cfg.get("RISK_MANAGEMENT", "tp_bonus_factor_2", 1.10)
+            if self._cfg else 1.10
+        )
+        if tp1_ticks >= bonus_t2:
+            confidence = min(0.95, confidence * factor_2)
+        elif tp1_ticks >= bonus_t1:
+            confidence = min(0.95, confidence * factor_1)
+
         # Bias filter — no trades against the prevailing bias
-        bias     = ctx.get("bias") or {}
-        bias_dir = bias.get("direction", "NEUTRAL")
+        bias      = ctx.get("bias") or {}
+        bias_dir  = bias.get("direction", "NEUTRAL")
         bias_prob = bias.get("probability", 50)
-        if bias_dir != "NEUTRAL" and bias_prob >= 65:
+        min_bias  = (
+            self._cfg.get("BIAS_PARAMETER", "min_bias_probability", 0.65) * 100
+            if self._cfg else 65
+        )
+        if bias_dir != "NEUTRAL" and bias_prob >= min_bias:
             if direction != bias_dir:
                 return None
 
@@ -127,6 +183,12 @@ class TradeSimulator:
         open_trades = self.get_open_trades()
         if len(open_trades) >= 1:
             return None
+
+        ict = ctx.get("ict_signals", {})
+        ms  = ict.get("market_structure", {})
+        ms_str = (
+            f"{ms.get('type','?')}_{ms.get('direction','?')}" if ms else None
+        )
 
         trade = SimulatedTrade(
             trade_id        = str(uuid.uuid4())[:8],
@@ -148,6 +210,17 @@ class TradeSimulator:
             time_of_day     = self._get_time_of_day(),
             bias_direction  = bias_dir,
             bias_probability = bias_prob,
+            killzone         = ict.get("active_killzone"),
+            ict_score        = ict.get("ict_score", 0),
+            order_blocks_active = len(ict.get("order_blocks", [])),
+            market_structure = ms_str,
+            liquidity_levels = len(ict.get("liquidity_levels", [])),
+            fvg_count        = len(ict.get("fvg_levels", [])),
+            bias_1h          = (ctx.get("ict_signals", {})
+                                .get("htf_bias", {})
+                                .get("direction", "NEUTRAL")),
+            trade_mode       = signal.get("trade_mode"),
+            reversal_type    = signal.get("reversal_info", {}).get("reversal_type"),
         )
 
         self._trades.append(asdict(trade))
@@ -192,7 +265,11 @@ class TradeSimulator:
                 elif current_price <= tp1:
                     exit_reason, exit_price = "WIN_TP1",  tp1
 
-            if duration > 240 and exit_reason is None:
+            timeout_min = (
+                self._cfg.get("KERNREGELN", "trade_timeout_minutes", 240)
+                if self._cfg else 240
+            )
+            if duration > timeout_min and exit_reason is None:
                 exit_reason, exit_price = "TIMEOUT", current_price
 
             if exit_reason:
@@ -246,10 +323,15 @@ class TradeSimulator:
             "avg_pnl_points":   round(sum(t["pnl_points"] for t in closed) / len(closed), 2),
             "avg_pnl_usd":      round(sum(t["pnl_usd_nq"] for t in closed) / len(closed), 2),
             "total_pnl_usd":    round(sum(t["pnl_usd_nq"] for t in closed), 2),
-            "best_signal_types":  self._best_signals(closed),
-            "worst_signal_types": self._worst_signals(closed),
-            "win_rate_by_regime": self._stats_by_regime(closed),
-            "win_rate_by_time":   self._stats_by_time(closed),
+            "best_signal_types":         self._best_signals(closed),
+            "worst_signal_types":        self._worst_signals(closed),
+            "win_rate_by_regime":        self._stats_by_regime(closed),
+            "win_rate_by_time":          self._stats_by_time(closed),
+            "win_rate_by_killzone":      self._stats_by_killzone(closed),
+            "win_rate_by_market_structure": self._stats_by_market_structure(closed),
+            "win_rate_by_ict_score":     self._stats_by_ict_score(closed),
+            "win_rate_by_order_blocks":  self._stats_by_order_blocks(closed),
+            "win_rate_by_trade_mode":    self._stats_by_trade_mode(closed),
         }
 
     def _best_signals(self, trades: list) -> dict:
@@ -295,6 +377,89 @@ class TradeSimulator:
                 times[tod]["wins"] += 1
         return {tod: round(s["wins"] / s["total"] * 100, 1)
                 for tod, s in times.items() if s["total"] > 0}
+
+    def _stats_by_killzone(self, trades: list) -> dict:
+        kz: dict = {
+            "IN_KILLZONE":      {"wins": 0, "total": 0},
+            "OUTSIDE_KILLZONE": {"wins": 0, "total": 0},
+        }
+        for t in trades:
+            key = "IN_KILLZONE" if t.get("killzone") else "OUTSIDE_KILLZONE"
+            kz[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                kz[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in kz.items() if v["total"] > 0
+        }
+
+    def _stats_by_market_structure(self, trades: list) -> dict:
+        ms: dict = {}
+        for t in trades:
+            key = t.get("market_structure") or "NONE"
+            if key not in ms:
+                ms[key] = {"wins": 0, "total": 0}
+            ms[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                ms[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in ms.items() if v["total"] > 0
+        }
+
+    def _stats_by_ict_score(self, trades: list) -> dict:
+        ranges: dict = {
+            "HIGH (>0.6)":      {"wins": 0, "total": 0},
+            "MEDIUM (0.3-0.6)": {"wins": 0, "total": 0},
+            "LOW (<0.3)":       {"wins": 0, "total": 0},
+            "NO_ICT":           {"wins": 0, "total": 0},
+        }
+        for t in trades:
+            score = t.get("ict_score") or 0
+            if score == 0:
+                key = "NO_ICT"
+            elif score >= 0.6:
+                key = "HIGH (>0.6)"
+            elif score >= 0.3:
+                key = "MEDIUM (0.3-0.6)"
+            else:
+                key = "LOW (<0.3)"
+            ranges[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                ranges[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in ranges.items() if v["total"] > 0
+        }
+
+    def _stats_by_order_blocks(self, trades: list) -> dict:
+        ob: dict = {
+            "MIT_OB":  {"wins": 0, "total": 0},
+            "OHNE_OB": {"wins": 0, "total": 0},
+        }
+        for t in trades:
+            key = "MIT_OB" if (t.get("order_blocks_active") or 0) > 0 else "OHNE_OB"
+            ob[key]["total"] += 1
+            if t["outcome"] == "WIN":
+                ob[key]["wins"] += 1
+        return {
+            k: round(v["wins"] / v["total"] * 100, 1)
+            for k, v in ob.items() if v["total"] > 0
+        }
+
+    def _stats_by_trade_mode(self, trades: list) -> dict:
+        modes: dict = {}
+        for t in trades:
+            mode = t.get("trade_mode") or "UNKNOWN"
+            if mode not in modes:
+                modes[mode] = {"wins": 0, "total": 0}
+            modes[mode]["total"] += 1
+            if t["outcome"] == "WIN":
+                modes[mode]["wins"] += 1
+        return {
+            m: round(s["wins"] / s["total"] * 100, 1)
+            for m, s in modes.items() if s["total"] > 0
+        }
 
     def apply_weights(self, weights_update: dict):
         self._weights.update(weights_update)

@@ -72,6 +72,7 @@ except ImportError as _e:
 from core.order_book import OrderBook
 from core.data_buffer import DataBuffer
 from core.free_data_client import FreeDataClient
+from core.strategy_config import StrategyConfig
 from signals.order_flow import OrderFlowAnalyzer
 from signals.signal_engine import SignalEngine
 from signals.bias_engine import MarketBiasEngine
@@ -87,12 +88,13 @@ class AppComponents:
     """All live components, initialised once and reused across reconnects."""
 
     def __init__(self) -> None:
+        self.strategy_config = StrategyConfig()
         self.order_book      = OrderBook("NQ")
         self.data_buffer     = DataBuffer()
         self.of_analyzer     = OrderFlowAnalyzer()
-        self.signal_engine   = SignalEngine()
-        self.bias_engine     = MarketBiasEngine()
-        self.limit_engine    = LimitOrderEngine()
+        self.signal_engine   = SignalEngine(self.strategy_config)
+        self.bias_engine     = MarketBiasEngine(self.strategy_config)
+        self.limit_engine    = LimitOrderEngine(self.strategy_config)
         self.claude          = _create_analyst()
         self.rithmic: "RithmicConnectionManager | None" = None
 
@@ -111,7 +113,7 @@ class AppComponents:
         self.delta_history:     collections.deque   = collections.deque(maxlen=120)
 
         # Trade simulation & learning
-        self.simulator:    TradeSimulator = TradeSimulator()
+        self.simulator:    TradeSimulator = TradeSimulator(self.strategy_config)
 
 
 def _create_analyst():
@@ -179,7 +181,7 @@ def run_learning_analysis() -> dict:
         analyst = _get_learning_analyst()
         # Capture weights before analysis so dashboard can show deltas
         previous_weights = _APP.simulator.get_weights().copy()
-        result = analyst.run_daily_analysis(_APP.simulator)
+        result = analyst.run_daily_analysis(_APP.simulator, _APP.strategy_config)
         result["previous_weights"] = previous_weights
         _LEARNING_RESULT.write_text(
             json.dumps(result, indent=2, default=str),
@@ -311,6 +313,7 @@ def _write_ui_state() -> None:
                 "1m":  free.get("bars_1m",  [])[-100:],
                 "5m":  free.get("bars_5m",  [])[-100:],
                 "15m": free.get("bars_15m", [])[-100:],
+                "1h":  free.get("bars_1h",  [])[-50:],
             },
             "market": {
                 "last_price":      last_price,
@@ -328,6 +331,7 @@ def _write_ui_state() -> None:
             "realtime_price":       free.get("realtime_price", 0.0),
             "realtime_last_update": free.get("realtime_last_update", ""),
             "scan":                      _APP.last_scan,
+            "ict_signals":               (_APP.last_scan or {}).get("ict_signals", {}),
             "signals":                   _APP.last_rec,
             "limit_orders":              _APP.last_limit_orders,
             "bias":                      free.get("bias", {}),

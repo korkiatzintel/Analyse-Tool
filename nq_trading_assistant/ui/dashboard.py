@@ -204,25 +204,46 @@ def _sidebar(state: Optional[dict]) -> None:
 
         st.divider()
 
-        # ── Claude cost & cache stats ──────────────────────────────────────
+        # ── KI Provider stats ──────────────────────────────────────────────
         if state is not None:
-            cs = state.get("claude_cost_stats", {})
+            cs            = state.get("claude_cost_stats", {})
+            provider      = cs.get("provider", "")
+            current_model = cs.get("current_model", "")
             if cs.get("total_calls", 0) > 0:
-                st.subheader("Claude API")
-                hit_pct = cs.get("cache_hit_rate", 0.0) * 100
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.metric("Calls",  cs.get("total_calls", 0))
-                    st.metric("Cache ✓", cs.get("cached_calls", 0))
-                with c2:
-                    st.metric("Hit-Rate", f"{hit_pct:.0f}%")
-                    st.metric("Kosten",   f"${cs.get('estimated_cost_usd', 0):.4f}")
-                if hit_pct >= 50:
-                    st.caption("🟢 Cache aktiv — ~90 % Ersparnis auf gecachte Tokens")
-                elif cs.get("total_calls", 0) == 1:
-                    st.caption("⏳ Erster Call — Cache wird beim nächsten Aufruf greifen")
+                if "Gemini" in provider:
+                    st.subheader("KI Provider")
+                    if "2.5" in current_model:
+                        st.success(f"🧠 {current_model}")
+                    else:
+                        st.warning(f"🔄 {current_model} (Fallback)")
+                    failures = cs.get("model_failures", {})
+                    if any(v > 0 for v in failures.values()):
+                        st.caption(
+                            "gemini-2.5-flash Quota heute erreicht → "
+                            "gemini-2.0-flash-lite aktiv"
+                        )
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.metric("Calls", cs.get("total_calls", 0))
+                    with c2:
+                        available = len(cs.get("models_available", []))
+                        st.metric("Modelle", f"{available}/{len(cs.get('model_failures', {}))}")
                 else:
-                    st.caption("🟡 Cache-Rate niedrig")
+                    st.subheader("Claude API")
+                    hit_pct = cs.get("cache_hit_rate", 0.0) * 100
+                    c1, c2  = st.columns(2)
+                    with c1:
+                        st.metric("Calls",   cs.get("total_calls", 0))
+                        st.metric("Cache ✓", cs.get("cached_calls", 0))
+                    with c2:
+                        st.metric("Hit-Rate", f"{hit_pct:.0f}%")
+                        st.metric("Kosten",   f"${cs.get('estimated_cost_usd', 0):.4f}")
+                    if hit_pct >= 50:
+                        st.caption("🟢 Cache aktiv — ~90 % Ersparnis auf gecachte Tokens")
+                    elif cs.get("total_calls", 0) == 1:
+                        st.caption("⏳ Erster Call — Cache wird beim nächsten Aufruf greifen")
+                    else:
+                        st.caption("🟡 Cache-Rate niedrig")
                 st.divider()
 
         # ── Manual trade log ───────────────────────────────────────────────
@@ -515,11 +536,22 @@ def _col_signals(state: dict) -> None:
                     f"{ts.get('stop_loss_price', 0):.2f} "
                     f"({ts.get('stop_loss_ticks', 0)} Ticks)",
                 )
+                tp1_ticks = ts.get("take_profit_1_ticks", 0)
+                if tp1_ticks >= 200:
+                    tp_badge = "🚀"
+                elif tp1_ticks >= 120:
+                    tp_badge = "✅"
+                elif tp1_ticks >= 80:
+                    tp_badge = "✅"
+                else:
+                    tp_badge = "⚠️"
                 c3.metric(
                     "TP1",
                     f"{ts.get('take_profit_1_price', 0):.2f} "
-                    f"({ts.get('take_profit_1_ticks', 0)} Ticks)",
+                    f"({tp1_ticks} Ticks) {tp_badge}",
                 )
+                if ts.get("tp_adjusted"):
+                    st.caption("📐 SL erweitert — TP1 Minimum (80 Ticks) durchgesetzt")
 
             st.divider()
 
@@ -868,11 +900,75 @@ def main() -> None:
             with st.expander("📋 Bias-Signale im Detail"):
                 for reason in bias.get("reasons", []):
                     st.markdown(f"• {reason}")
-            if bias_dir != "NEUTRAL" and bias_prob >= 65:
+            # Reversal status display
+            reversal = state.get("scan", {}).get("reversal", {})
+            rev_type = reversal.get("reversal_type")
+            rev_dir  = reversal.get("direction")
+            rev_conf = reversal.get("confidence", 0.0)
+            if rev_type == "CONFIRMED":
+                st.error(
+                    f"🔄 **WENDEPUNKT BESTÄTIGT** — {rev_dir} "
+                    f"({rev_conf:.0%}) | Bias-Filter aufgehoben"
+                )
+                with st.expander("📋 Reversal-Signale"):
+                    for rs in reversal.get("signals", []):
+                        st.caption(f"• {rs.get('type', '')} — {rs.get('description', '')}")
+            elif rev_type == "POTENTIAL":
+                st.warning(
+                    f"⚠️ Potentieller Wendepunkt {rev_dir} "
+                    f"({rev_conf:.0%}) — Bias-Filter aufgehoben"
+                )
+                with st.expander("📋 Reversal-Signale"):
+                    for rs in reversal.get("signals", []):
+                        st.caption(f"• {rs.get('type', '')} — {rs.get('description', '')}")
+            elif bias_dir != "NEUTRAL" and bias_prob >= 70:
                 st.info(
                     f"ℹ️ Nur {bias_dir}-Trades werden simuliert "
-                    f"und als Signal ausgegeben."
+                    f"(Bias ≥70% erforderlich)."
                 )
+
+        # ── ICT Killzone & Confluence ───────────────────────────────────────
+        ict = state.get("ict_signals", {})
+        if ict and not ict.get("error"):
+            st.subheader("⚔️ ICT Analyse")
+            killzone  = ict.get("active_killzone")
+            ict_score = ict.get("ict_score", 0.0)
+
+            if killzone:
+                st.success(f"🎯 **ICT Killzone aktiv: {killzone}** — Optimale Trading-Zeit!")
+            else:
+                st.info("⏰ Keine aktive Killzone — Nächste: NY AM (10:00–11:00 EST)")
+
+            if ict_score > 0:
+                col_ict1, col_ict2 = st.columns(2)
+                with col_ict1:
+                    st.metric("ICT Confluence Score", f"{ict_score:.0%}")
+                    st.progress(ict_score)
+                with col_ict2:
+                    htf = ict.get("htf_bias", {})
+                    ms  = ict.get("market_structure", {})
+                    if htf:
+                        st.metric(
+                            "HTF Bias (1h)",
+                            htf.get("type", "?"),
+                            delta=htf.get("direction", ""),
+                        )
+                    elif ms:
+                        st.metric(
+                            "Market Structure (15m)",
+                            ms.get("type", "?"),
+                            delta=ms.get("direction", ""),
+                        )
+                    else:
+                        ob_count  = len(ict.get("order_blocks", []))
+                        fvg_count = len(ict.get("fvg_levels", []))
+                        st.metric("Order Blocks / FVGs", f"{ob_count} OB / {fvg_count} FVG")
+
+                reasons = ict.get("ict_reasons", [])
+                if reasons:
+                    with st.expander("📋 ICT Signal Details"):
+                        for r in reasons:
+                            st.markdown(f"• {r}")
 
         # ── Konfidenz-Analyse Panel ─────────────────────────────────────────
         with st.expander("🔍 Konfidenz-Analyse", expanded=False):
@@ -973,6 +1069,36 @@ def main() -> None:
                         )
                     st.caption(f"Signale: {', '.join(t.get('active_signals', []))}")
 
+            # Killzone Performance
+            kz_stats = sim_stats.get("win_rate_by_killzone", {})
+            if kz_stats:
+                st.subheader("🎯 Killzone Performance")
+                col_kz1, col_kz2 = st.columns(2)
+                kz_in  = kz_stats.get("IN_KILLZONE", 0)
+                kz_out = kz_stats.get("OUTSIDE_KILLZONE", 0)
+                col_kz1.metric(
+                    "In Killzone",
+                    f"{kz_in:.1f}%",
+                    delta=f"{kz_in - kz_out:+.1f}% vs. außerhalb",
+                )
+                col_kz2.metric("Außerhalb Killzone", f"{kz_out:.1f}%")
+
+            # Trade Mode Performance
+            mode_stats = sim_stats.get("win_rate_by_trade_mode", {})
+            if mode_stats:
+                st.subheader("🔄 Trade-Modus Performance")
+                mode_cols = st.columns(len(mode_stats))
+                mode_icons = {"TREND": "📈", "REVERSAL": "🔄", "NEUTRAL": "◆", "UNKNOWN": "❓"}
+                for i, (mode, wr) in enumerate(mode_stats.items()):
+                    with mode_cols[i]:
+                        icon = mode_icons.get(mode, "")
+                        delta_val = wr - sim_stats.get("win_rate", 50)
+                        mode_cols[i].metric(
+                            f"{icon} {mode}",
+                            f"{wr:.1f}%",
+                            delta=f"{delta_val:+.1f}% vs. Gesamt",
+                        )
+
             # Win-Rate nach Signal-Typ
             best_signals = sim_stats.get("best_signal_types", {})
             if best_signals:
@@ -1062,7 +1188,44 @@ def main() -> None:
 
                     # Zusammenfassung
                     st.markdown("### 📋 Was hat die KI herausgefunden?")
-                    st.markdown(f"> {analyse.get('zusammenfassung', '')}")
+                    zusammenfassung = analyse.get("zusammenfassung", "")
+                    if zusammenfassung:
+                        import re as _re
+                        _clean = zusammenfassung.strip()
+                        if _clean.startswith(("{", "[")):
+                            try:
+                                _parsed = json.loads(_clean)
+                                _texts: list = []
+
+                                def _collect(_o):
+                                    if isinstance(_o, str) and len(_o) > 5:
+                                        _texts.append(_o)
+                                    elif isinstance(_o, list):
+                                        for _i in _o:
+                                            _collect(_i)
+                                    elif isinstance(_o, dict):
+                                        for _v in _o.values():
+                                            _collect(_v)
+
+                                _collect(_parsed)
+                                _clean = "\n\n".join(_texts)
+                            except Exception:
+                                _clean = _re.sub(r'[{}\[\]":]', " ", _clean)
+                                _clean = _re.sub(r"\s+", " ", _clean).strip()
+                        # Split into numbered points at known separators
+                        _lines: list = []
+                        for _sep in (" | ", "\n", ". "):
+                            if _sep in _clean:
+                                _lines = [l.strip() for l in _clean.split(_sep) if l.strip()]
+                                break
+                        if _lines and len(_lines) > 1:
+                            for _idx, _line in enumerate(_lines[:6], 1):
+                                if _line:
+                                    st.markdown(f"**{_idx}.** {_line}")
+                        else:
+                            st.markdown(f"> {_clean[:800]}")
+                    else:
+                        st.info("Noch keine Analyse vorhanden.")
                     st.divider()
 
                     # Strategien — Herzstück
@@ -1113,13 +1276,102 @@ def main() -> None:
                         st.divider()
 
                     # Handlungsempfehlungen
-                    st.markdown("### ✅ Was solltest du als Trader beachten?")
-                    for i, emp in enumerate(result_data.get("handlungsempfehlungen", []), 1):
-                        st.markdown(f"**{i}.** {emp}")
+                    empfehlungen = result_data.get("handlungsempfehlungen", [])
+                    if empfehlungen:
+                        st.markdown("### ✅ Handlungsempfehlungen")
+                        import re as _re2
+                        for _i, _emp in enumerate(empfehlungen[:3], 1):
+                            if _emp and isinstance(_emp, str):
+                                _emp_clean = _re2.sub(r'[{}\[\]":]', "", _emp).strip()
+                                if _emp_clean:
+                                    st.markdown(f"**{_i}.** {_emp_clean}")
 
                     naechste = result_data.get("naechste_analyse_in", "")
                     if naechste:
                         st.info(f"📅 Empfehlung für nächste Analyse: {naechste}")
+
+                    # ICT-spezifische Erkenntnisse
+                    ict_emp = result_data.get("ict_empfehlungen", {})
+                    if ict_emp:
+                        st.divider()
+                        st.markdown("### 🎯 ICT Erkenntnisse")
+
+                        kz = ict_emp.get("killzone_filter_staerken", None)
+                        if kz is True:
+                            st.success("✅ Killzone-Filter bestätigt — außerhalb schlechtere Performance")
+                        elif kz is False:
+                            st.info("ℹ️ Killzone-Filter noch kein klarer Vorteil")
+
+                        beste_ms = ict_emp.get("beste_market_structure", "")
+                        if beste_ms:
+                            st.info(f"📊 Beste Market Structure: **{beste_ms}**")
+
+                        schwelle = ict_emp.get("ict_score_schwelle") or ict_emp.get("ict_score_schwelle_empfehlung", 0)
+                        if schwelle:
+                            st.caption(f"🎯 Empfohlene ICT Score-Schwelle: {schwelle:.2f}")
+
+                        if ict_emp.get("order_block_pflicht") is True:
+                            st.warning("⚠️ Order Blocks stark empfohlen")
+
+                    # Parameter-Änderungen
+                    update_report     = result_data.get("update_report", {})
+                    param_begruendung = result_data.get("parameter_begruendung", {})
+
+                    if update_report and update_report.get("accepted"):
+                        st.divider()
+                        st.markdown("### 🔧 Angepasste Strategie-Parameter")
+
+                        _SECTION_NAMES = {
+                            "SIGNAL_GEWICHTUNGEN":  "Signal-Gewichtung",
+                            "KONFIDENZ_SCHWELLEN":  "Konfidenz-Schwelle",
+                            "BIAS_PARAMETER":       "Bias-Erkennung",
+                            "RISK_MANAGEMENT":      "Risiko-Management",
+                            "VIX_REGIME_GRENZEN":   "Volatilitäts-Filter",
+                            "KONTEXT_MODIFIKATOREN": "Tageszeit-Anpassung",
+                            "LIMIT_ORDER_PARAMETER": "Limit-Order Einstellung",
+                        }
+                        _KEY_NAMES = {
+                            "FAIR_VALUE_GAP":              "Preislücken-Strategie",
+                            "MULTI_TF_BIAS":               "Trend-Richtungsanalyse",
+                            "EMA_TREND":                   "Gleitender Durchschnitt",
+                            "VWAP_POSITION":               "VWAP-Position",
+                            "RSI_EXTREME":                 "Überkauft/Überverkauft",
+                            "min_confidence_normal":       "Mindest-Konfidenz (normal)",
+                            "min_confidence_vix_high":     "Mindest-Konfidenz (hohe Vola)",
+                            "sl_atr_multiplier":           "Stop-Loss Größe",
+                            "rth_open_bonus":              "Bonus erste Handelsstunde",
+                            "vix_penalty_high":            "Abzug bei hoher Volatilität",
+                        }
+
+                        for change in update_report["accepted"]:
+                            param = change["param"]
+                            old   = change["old"]
+                            new   = change["new"]
+                            delta = change["change"]
+                            parts = param.split(".")
+                            section_k = parts[0] if parts else param
+                            key_k     = parts[-1] if len(parts) > 1 else param
+
+                            anzeige_section = _SECTION_NAMES.get(section_k, section_k)
+                            anzeige_key     = _KEY_NAMES.get(key_k, key_k)
+                            begruendung     = param_begruendung.get(param, "")
+
+                            col1, col2 = st.columns([3, 2])
+                            with col1:
+                                if delta > 0:
+                                    st.success(f"📈 **{anzeige_section}**: {anzeige_key}")
+                                else:
+                                    st.warning(f"📉 **{anzeige_section}**: {anzeige_key}")
+                                if begruendung:
+                                    st.caption(f"💬 {begruendung}")
+                            with col2:
+                                st.metric(
+                                    "Änderung",
+                                    f"{new:.3f}",
+                                    delta=f"{delta:+.3f}",
+                                    delta_color="normal",
+                                )
+                            st.divider()
 
                 elif last_result.get("status") == "insufficient_data":
                     st.warning(last_result["message"])

@@ -96,8 +96,8 @@ class FreeDataClient:
         self.on_market_context:  Optional[Callable] = None
 
         # Internal bar storage (keyed by timeframe string)
-        self._bars: Dict[str, List[dict]] = {"1m": [], "5m": [], "15m": []}
-        self._last_bar_ts: Dict[str, int] = {"1m": 0, "5m": 0, "15m": 0}
+        self._bars: Dict[str, List[dict]] = {"1m": [], "5m": [], "15m": [], "1h": []}
+        self._last_bar_ts: Dict[str, int] = {"1m": 0, "5m": 0, "15m": 0, "1h": 0}
 
         # Realtime price override (Barchart fallback, updated every 10s)
         self._last_price: float = 0.0
@@ -336,6 +336,7 @@ class FreeDataClient:
             "bars_1m":             list(self._bars["1m"][-60:]),
             "bars_5m":             list(self._bars["5m"][-30:]),
             "bars_15m":            list(self._bars["15m"][-20:]),
+            "bars_1h":             list(self._bars["1h"][-200:]),
             "vix":                 self._vix,
             "vix_regime":          vix_regime,
             "yield_10y":           self._yield_10y,
@@ -367,8 +368,9 @@ class FreeDataClient:
         await loop.run_in_executor(None, self._fetch_calendar)
         await loop.run_in_executor(None, self._fetch_fred)
         logger.info(
-            "FreeDataClient warm-up: 1m=%d bars, 5m=%d bars, 15m=%d bars, VIX=%.1f",
-            len(self._bars["1m"]), len(self._bars["5m"]), len(self._bars["15m"]),
+            "FreeDataClient warm-up: 1m=%d bars, 5m=%d bars, 15m=%d bars, 1h=%d bars, VIX=%.1f",
+            len(self._bars["1m"]), len(self._bars["5m"]),
+            len(self._bars["15m"]), len(self._bars["1h"]),
             self._vix,
         )
         # Emit context immediately after warm-up so ui_state.json is written
@@ -410,17 +412,25 @@ class FreeDataClient:
 
     def _fetch_yfinance(self, period: str) -> Dict[str, List[dict]]:
         yf = _import_yfinance()
-        new_bars: Dict[str, List[dict]] = {"1m": [], "5m": [], "15m": []}
+        new_bars: Dict[str, List[dict]] = {"1m": [], "5m": [], "15m": [], "1h": []}
 
-        for tf, interval in [("1m", "1m"), ("5m", "5m"), ("15m", "15m")]:
+        # 1h uses a fixed 60-day window to capture ~200 hourly bars
+        tf_configs = [
+            ("1m",  "1m",  period),
+            ("5m",  "5m",  period),
+            ("15m", "15m", period),
+            ("1h",  "1h",  "60d"),
+        ]
+
+        for tf, interval, tf_period in tf_configs:
             try:
                 df = yf.download(
                     _TICKERS["nq"],
-                    period=period,
+                    period=tf_period,
                     interval=interval,
                     progress=False,
                     auto_adjust=True,
-                    prepost=False,     # regular session only
+                    prepost=False,
                 )
                 if df.empty:
                     continue
@@ -435,8 +445,9 @@ class FreeDataClient:
                 fresh = [b for b in bars if b["timestamp"] > last]
 
                 self._bars[tf].extend(fresh)
-                # Keep rolling window manageable
-                self._bars[tf] = self._bars[tf][-500:]
+                # Rolling window: 200 bars for 1h, 500 for others
+                limit = 200 if tf == "1h" else 500
+                self._bars[tf] = self._bars[tf][-limit:]
 
                 if fresh:
                     self._last_bar_ts[tf] = fresh[-1]["timestamp"]
