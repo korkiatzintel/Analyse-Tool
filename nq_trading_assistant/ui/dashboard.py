@@ -897,9 +897,37 @@ def main() -> None:
             with col_b3:
                 st.metric("🔴 Bearish", f"{bear_prob:.0f}%")
                 st.progress(bear_prob / 100)
-            with st.expander("📋 Bias-Signale im Detail"):
-                for reason in bias.get("reasons", []):
-                    st.markdown(f"• {reason}")
+            # Premium/Discount Badge
+            premium_discount = bias.get("premium_discount", "")
+            pd_labels = {
+                "PREMIUM":     "🔴 PREMIUM — Short bevorzugt",
+                "DISCOUNT":    "🟢 DISCOUNT — Long bevorzugt",
+                "EQUILIBRIUM": "⚪ EQUILIBRIUM — Neutral",
+            }
+            if premium_discount in pd_labels:
+                st.caption(pd_labels[premium_discount])
+
+            # 4-Ebenen Breakdown
+            details = bias.get("details", {})
+            with st.expander("🔍 Bias Details — 4 Ebenen"):
+                level_names = {
+                    "htf_bias":         "Ebene 1: 1H Struktur",
+                    "session_context":  "Ebene 2: Session Kontext",
+                    "key_levels":       "Ebene 3: PDH/PDL & ORB",
+                    "ltf_confirmation": "Ebene 4: LTF 5m/15m",
+                }
+                for key, label in level_names.items():
+                    level = details.get(key, {})
+                    if level:
+                        bull_l = level.get("bull", 0.5) * 100
+                        bear_l = level.get("bear", 0.5) * 100
+                        col_l, col_b, col_be = st.columns([3, 1, 1])
+                        col_l.markdown(f"**{label}**")
+                        col_b.metric("Bull", f"{bull_l:.0f}%")
+                        col_be.metric("Bear", f"{bear_l:.0f}%")
+                        for r in level.get("reasons", []):
+                            st.caption(f"  • {r}")
+
             if bias_dir != "NEUTRAL" and bias_prob >= 65:
                 st.info(
                     f"ℹ️ Nur {bias_dir}-Trades werden simuliert "
