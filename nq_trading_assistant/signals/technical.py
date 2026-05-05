@@ -101,7 +101,7 @@ class TechnicalAnalyzer:
     Internally builds DataFrames from minute / second bar lists.
     """
 
-    def analyze(self, data_snap: dict) -> List[Signal]:
+    def analyze(self, data_snap: dict, bias_direction: str = "NEUTRAL") -> List[Signal]:
         signals: List[Signal] = []
 
         last_price   = data_snap.get("last_price", 0.0)
@@ -117,7 +117,7 @@ class TechnicalAnalyzer:
         min_df = _bars_to_df(min_bars)
         sec_df = _bars_to_df(sec_bars)
 
-        signals += self._vwap_position(last_price, vwap)
+        signals += self._vwap_position(last_price, vwap, bias_direction)
         signals += self._fair_value_gap(min_df, last_price)
         signals += self._ema_trend(sec_df, last_price)
         signals += self._rsi_extreme(min_df, last_price)
@@ -130,7 +130,7 @@ class TechnicalAnalyzer:
     # ------------------------------------------------------------------
 
     def _vwap_position(
-        self, price: float, vwap: Optional[float]
+        self, price: float, vwap: Optional[float], bias_direction: str = "NEUTRAL"
     ) -> List[Signal]:
         if vwap is None or vwap == 0.0:
             return []
@@ -157,16 +157,31 @@ class TechnicalAnalyzer:
                 f"Preis {side_str} VWAP ({distance:+.1f} Pts) — Trend bestätigt"
             )
         else:
-            # Zone 3: weit entfernt — Mean-Reversion Signal (Richtungsumkehr!)
+            # Zone 3: weit entfernt — Mean-Reversion (Richtungsumkehr)
             # Preis weit unter VWAP → LONG erwarten; weit über → SHORT erwarten
-            direction  = Direction.BULLISH if distance < 0 else Direction.BEARISH
+            reversion_dir = Direction.BULLISH if distance < 0 else Direction.BEARISH
+            rev_str       = "LONG" if distance < 0 else "SHORT"
+
+            # Mean Reversion gegen starken Bias blockieren:
+            # z.B. Preis weit über VWAP (SHORT-Reversion) aber Bias LONG → kein Trade
+            if reversion_dir == Direction.BULLISH and bias_direction == "SHORT":
+                logger.debug(
+                    "VWAP Zone 3 LONG-Reversion blockiert: Bias ist SHORT"
+                )
+                return []
+            if reversion_dir == Direction.BEARISH and bias_direction == "LONG":
+                logger.debug(
+                    "VWAP Zone 3 SHORT-Reversion blockiert: Bias ist LONG"
+                )
+                return []
+
+            direction  = reversion_dir
             confidence = 0.65
             side_str   = "unter" if distance < 0 else "über"
-            rev_dir    = "LONG" if distance < 0 else "SHORT"
             desc = (
                 f"Preis EXTREM {side_str} VWAP ({distance:+.1f} Pts = "
                 f"{distance_atr:.1f}x ATR) — "
-                f"Mean Reversion {rev_dir} erwartet"
+                f"Mean Reversion {rev_str} erwartet"
             )
 
         return [_make_signal(

@@ -447,8 +447,9 @@ class SignalEngine:
             all_signals = _dampen_confidence(all_signals, factor=0.80)
 
         # Add technical signals using 5m bars
-        data_snap_5m = _free_snap_to_data_snap(free_snap)
-        ta_signals   = self._ta_analyzer.analyze(data_snap_5m)
+        data_snap_5m  = _free_snap_to_data_snap(free_snap)
+        bias_dir_free = (free_snap.get("bias") or {}).get("direction", "NEUTRAL")
+        ta_signals    = self._ta_analyzer.analyze(data_snap_5m, bias_direction=bias_dir_free)
         all_signals  = all_signals + ta_signals
 
         if not all_signals:
@@ -831,7 +832,8 @@ class SignalEngine:
         free_signals = self._free_analyzer.analyze(ctx)
         if ctx.get("vix", 0.0) > vix_high_thresh:
             free_signals = _dampen_confidence(free_signals, factor=vix_penalty)
-        ta_signals = self._ta_analyzer.analyze(_free_snap_to_data_snap(ctx))
+        bias_dir_ctx = (ctx.get("bias") or {}).get("direction", "NEUTRAL")
+        ta_signals   = self._ta_analyzer.analyze(_free_snap_to_data_snap(ctx), bias_direction=bias_dir_ctx)
         signals = [
             _signal_to_dict(s)
             for s in (free_signals + ta_signals)
