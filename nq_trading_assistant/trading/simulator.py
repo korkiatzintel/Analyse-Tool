@@ -436,6 +436,7 @@ class TradeSimulator:
             "win_rate_by_market_structure": self._stats_by_market_structure(closed),
             "win_rate_by_ict_score":     self._stats_by_ict_score(closed),
             "win_rate_by_order_blocks":  self._stats_by_order_blocks(closed),
+            "fix_validation":            self._validate_fixes(),
         }
 
     def _best_signals(self, trades: list) -> dict:
@@ -550,6 +551,61 @@ class TradeSimulator:
             k: round(v["wins"] / v["total"] * 100, 1)
             for k, v in ob.items() if v["total"] > 0
         }
+
+    def _validate_fixes(self) -> dict:
+        """Programmatisch pruefen ob aktive Fixes korrekt funktionieren."""
+        closed = [t for t in self._trades if t.get("outcome") is not None]
+        results: dict = {}
+
+        # FIX_PREMARKET: Keine Trades mit time_of_day == PREMARKET
+        premarket_count = sum(1 for t in closed if t.get("time_of_day") == "PREMARKET")
+        results["FIX_PREMARKET"] = {
+            "status": "OK" if premarket_count == 0 else "VERLETZT",
+            "detail": f"{premarket_count} Premarket-Trades gefunden (Ziel: 0)",
+        }
+
+        # FIX_LUNCH_BLOCK: Keine Trades mit time_of_day == LUNCH
+        lunch_count = sum(1 for t in closed if t.get("time_of_day") == "LUNCH")
+        results["FIX_LUNCH_BLOCK"] = {
+            "status": "OK" if lunch_count == 0 else "VERLETZT",
+            "detail": f"{lunch_count} Lunch-Trades gefunden (Ziel: 0)",
+        }
+
+        # FIX_COOLDOWN: Kein Trade-Paar mit < 10 Min Abstand
+        sorted_closed = sorted(closed, key=lambda x: x.get("timestamp_entry", ""))
+        cooldown_violations = 0
+        for i in range(1, len(sorted_closed)):
+            try:
+                t1 = datetime.fromisoformat(sorted_closed[i - 1]["timestamp_entry"])
+                t2 = datetime.fromisoformat(sorted_closed[i]["timestamp_entry"])
+                if (t2 - t1).total_seconds() < COOLDOWN_MINUTES * 60:
+                    cooldown_violations += 1
+            except Exception:
+                pass
+        results["FIX_COOLDOWN"] = {
+            "status": "OK" if cooldown_violations == 0 else "VERLETZT",
+            "detail": f"{cooldown_violations} Trade-Paare mit < {COOLDOWN_MINUTES} Min Abstand",
+        }
+
+        # FIX_VWAP_LOGIC: Nicht pruefbar aus Trade-Daten allein — als NICHT_PRUEFBAR markieren
+        results["FIX_VWAP_LOGIC"] = {
+            "status": "NICHT_PRUEFBAR",
+            "detail": "VWAP-Richtungslogik nur im laufenden Betrieb pruefbar",
+        }
+
+        # FIX_FVG_DEDUP: Kein Trade sollte denselben FVG-Typ mehrfach in active_signals haben
+        fvg_dup_count = 0
+        for t in closed:
+            sigs = t.get("active_signals", [])
+            fvg_sigs = [s for s in sigs if s == "FAIR_VALUE_GAP"]
+            if len(fvg_sigs) > 1:
+                fvg_dup_count += 1
+        results["FIX_FVG_DEDUP"] = {
+            "status": "OK" if fvg_dup_count == 0 else "VERLETZT",
+            "detail": f"{fvg_dup_count} Trades mit doppeltem FVG-Signal",
+        }
+
+        return results
 
     def apply_weights(self, weights_update: dict):
         self._weights.update(weights_update)

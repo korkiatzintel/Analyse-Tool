@@ -4,6 +4,15 @@ import re
 from pathlib import Path
 from datetime import datetime
 
+CHANGELOG_FILE = Path(__file__).parent.parent / "logs" / "system_changelog.json"
+
+
+def _load_system_changelog() -> dict:
+    try:
+        return json.loads(CHANGELOG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
 
 def _clean_diagnose(text: str) -> str:
     """Bereinige Gemini-Diagnosetext — entferne JSON-Artefakte wenn nötig."""
@@ -84,6 +93,39 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
         self._log           = logging.getLogger(__name__)
         self._analysis_file = Path(__file__).parent.parent / "logs" / "learning_analysis.json"
 
+    def _evaluate_previous_recommendations(self, current_stats: dict) -> str:
+        """Vergleiche aktuelle Win-Rate mit der letzten Analyse und gib Feedback."""
+        try:
+            history = json.loads(self._analysis_file.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        if not history:
+            return ""
+
+        last = history[-1]
+        prev_wr = last.get("stats_snapshot", {}).get("win_rate", None)
+        curr_wr = current_stats.get("win_rate", None)
+        if prev_wr is None or curr_wr is None:
+            return ""
+
+        prev_trades = last.get("trades_analyzed", 0)
+        curr_trades = current_stats.get("total", 0)
+        delta       = curr_wr - prev_wr
+        new_trades  = curr_trades - prev_trades
+
+        prev_recs = (
+            last.get("result", {}).get("handlungsempfehlungen", [])
+        )
+        recs_text = "\n".join(f"  - {r}" for r in prev_recs[:3]) if prev_recs else "  (keine)"
+
+        direction = "verbessert" if delta > 0 else "verschlechtert" if delta < 0 else "unveraendert"
+        return (
+            f"VORHERIGE ANALYSE (vor {new_trades} neuen Trades):\n"
+            f"  Win-Rate damals: {prev_wr}% → jetzt: {curr_wr}% ({delta:+.1f}%, {direction})\n"
+            f"  Damalige Empfehlungen:\n{recs_text}\n"
+            f"  → Beurteile ob die Empfehlungen geholfen haben und passe deine neue Analyse entsprechend an.\n"
+        )
+
     def run_daily_analysis(self, simulator, strategy_config=None) -> dict:
         stats           = simulator.get_stats()
         closed_trades   = simulator.get_closed_trades(limit=20)
@@ -95,6 +137,40 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
                 "status":  "insufficient_data",
                 "message": f"Zu wenige Trades ({stats['total']}). Mindestens 5 benötigt.",
             }
+
+        # ── System-Kontext laden ──────────────────────────────────────────
+        changelog = _load_system_changelog()
+        active_fixes = changelog.get("active_fixes", [])
+        baseline_wr  = changelog.get("baseline_win_rate", None)
+        baseline_n   = changelog.get("baseline_trades", None)
+
+        system_context_lines = ["AKTIVE SYSTEM-FIXES (Version 2.0):"]
+        for fix in active_fixes:
+            system_context_lines.append(
+                f"  [{fix['id']}] {fix['beschreibung']}"
+                f" — Erwartet: {fix.get('erwartet', '?')}"
+            )
+        if baseline_wr is not None:
+            system_context_lines.append(
+                f"\nBASELINE (vor Fixes): {baseline_wr}% Win-Rate über {baseline_n} Trades"
+            )
+        system_context = "\n".join(system_context_lines)
+
+        # ── Fix-Validierung aufbereiten ───────────────────────────────────
+        fix_validation = stats.get("fix_validation", {})
+        if fix_validation:
+            fv_lines = ["FIX-VALIDIERUNG (automatisch geprüft):"]
+            for fix_id, val in fix_validation.items():
+                status = val.get("status", "?")
+                detail = val.get("detail", "")
+                icon   = "✓" if status == "OK" else ("?" if status == "NICHT_PRUEFBAR" else "✗")
+                fv_lines.append(f"  {icon} {fix_id}: {status} — {detail}")
+            fix_val_text = "\n".join(fv_lines)
+        else:
+            fix_val_text = ""
+
+        # ── Vorherige Empfehlungen auswerten ──────────────────────────────
+        prev_rec_text = self._evaluate_previous_recommendations(stats)
 
         # ── Daten kompakt aufbereiten ─────────────────────────────────────
         trade_lines = []
@@ -145,10 +221,13 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             if not k.startswith("_") and isinstance(v, (int, float))
         )
 
-        # ── CALL 1: Diagnose (~300 Token Output) ──────────────────────────
+        # ── CALL 1: Diagnose mit System-Kontext (~350 Token Output) ───────
         prompt_1 = (
-            f"NQ Futures Trading System — Kurzanalyse auf Deutsch.\n\n"
-            f"PERFORMANCE:\n{stats_compact}\n"
+            f"NQ Futures Trading System v2.0 — Diagnose auf Deutsch.\n\n"
+            f"{system_context}\n\n"
+            + (f"{fix_val_text}\n\n" if fix_val_text else "")
+            + (f"{prev_rec_text}\n" if prev_rec_text else "")
+            + f"PERFORMANCE:\n{stats_compact}\n"
             f"Signale: {sig_perf}\n"
             f"Zeit: {' | '.join(f'{k}:{v}%' for k, v in stats.get('win_rate_by_time', {}).items())}\n"
             f"VIX: {' | '.join(f'{k}:{v}%' for k, v in stats.get('win_rate_by_regime', {}).items())}\n\n"
@@ -158,11 +237,11 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             f"ICT Score: {ict_score_stats}\n"
             f"Order Blocks: {ob_compact}\n\n"
             f"LETZTE 15 TRADES:\n{trades_compact}\n\n"
-            f"Schreibe 4 kurze Stichpunkte (je max 15 Wörter):\n"
-            f"1. Größte Stärke\n"
-            f"2. Größtes Problem\n"
-            f"3. ICT-Killzone sinnvoll? (ja/nein + Begründung)\n"
-            f"4. Wichtigste Sofort-Maßnahme"
+            f"Beantworte genau diese 4 Fragen (je max 15 Wörter):\n"
+            f"1. Grösste Stärke des Systems NACH den v2.0-Fixes?\n"
+            f"2. Welcher Fix hat noch NICHT die erwartete Wirkung gezeigt und warum?\n"
+            f"3. Gibt es Zeitfenster oder VIX-Regime mit auffällig schlechter Performance trotz Fixes?\n"
+            f"4. Wichtigste nächste Massnahme die ÜBER die aktiven Fixes hinausgeht?"
         )
         diagnose = self._call_analyst(prompt_1, max_tokens=350)
         self._log.info("Diagnose erhalten: %d Zeichen", len(diagnose))
@@ -298,6 +377,9 @@ Maximale Änderung pro Signal pro Analyse: ±0.3 (keine extremen Sprünge)."""
             "handlungsempfehlungen": handlungsempfehlungen[:3],
             "naechste_analyse_in":   naechste_analyse,
             "calls_used":            3,
+            "system_version":        changelog.get("version", "?"),
+            "fix_validation":        fix_validation,
+            "baseline_win_rate":     baseline_wr,
         }
 
         # ── Speichern ─────────────────────────────────────────────────────

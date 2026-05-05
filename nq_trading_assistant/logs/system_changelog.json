@@ -1,0 +1,49 @@
+{
+  "version": "2.0",
+  "last_reset": null,
+  "active_fixes": [
+    {
+      "id": "FIX_PREMARKET",
+      "beschreibung": "Premarket-Trades komplett gesperrt",
+      "detail": "Keine Trades vor 09:30 ET (13:30 UTC) und nach 16:00 ET (20:00 UTC). Simulator gibt None zurück, signal_engine gibt blocked_reason zurück.",
+      "erwartet": "Weniger schlechte Trades ohne institutionelles Volumen",
+      "seit_version": "2.0",
+      "status": "AKTIV"
+    },
+    {
+      "id": "FIX_VWAP_LOGIC",
+      "beschreibung": "VWAP-Logik korrigiert: 3-Zonen-Modell implementiert",
+      "detail": "Zone 1 (<0.5 ATR): Trend-Signal 55% Konfidenz. Zone 2 (0.5-1.5 ATR): Trend-Signal 75%. Zone 3 (>1.5 ATR): Mean-Reversion mit UMGEKEHRTER Richtung. Zuvor zeigte das System die falsche Richtung bei extremer VWAP-Abweichung.",
+      "erwartet": "VWAP-Signale sind nun logisch korrekt, weniger Gegentrend-Verluste",
+      "seit_version": "2.0",
+      "status": "AKTIV"
+    },
+    {
+      "id": "FIX_FVG_DEDUP",
+      "beschreibung": "FVG-Duplikate entfernt — ein Signal pro Richtung",
+      "detail": "_deduplicate_signals() in signal_engine.py. Schluessel: type+direction. Bestes Konfidenz-Signal wird behalten. FVG wurde zuvor doppelt gezaehlt und hat die Gesamtkonfidenz kuenstlich aufgeblasen.",
+      "erwartet": "Realistischere Konfidenzwerte, weniger Uebergewichtung von FVG",
+      "seit_version": "2.0",
+      "status": "AKTIV"
+    },
+    {
+      "id": "FIX_COOLDOWN",
+      "beschreibung": "Trade-Cooldown von 5 auf 10 Minuten erhoeht",
+      "detail": "COOLDOWN_MINUTES = 10 in simulator.py. Verhindert dass mehrere Trades innerhalb von Sekunden/Minuten geoeffnet werden wenn Markt sich schnell bewegt.",
+      "erwartet": "Weniger Duplikat-Trades, bessere Selektion",
+      "seit_version": "2.0",
+      "status": "AKTIV"
+    },
+    {
+      "id": "FIX_LUNCH_BLOCK",
+      "beschreibung": "Mittagspause-Trades gesperrt (13:00-14:00 ET)",
+      "detail": "LUNCH = 17:00-18:00 UTC. Geringes Volumen, unzuverlaessige Signale. Entspricht FIX_PREMARKET Logik.",
+      "erwartet": "Keine Fehlsignale in liquiditaetsarmer Mittagszeit",
+      "seit_version": "2.0",
+      "status": "AKTIV"
+    }
+  ],
+  "baseline_win_rate": 38.0,
+  "baseline_trades": 79,
+  "notes": "Trade-History wurde nach den Fixes zurueckgesetzt. Neue Daten beginnen ab Version 2.0."
+}
