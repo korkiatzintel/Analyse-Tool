@@ -36,9 +36,14 @@ class GeminiAnalyst:
         self._client          = genai.Client(api_key=api_key)
         self._log             = logging.getLogger(__name__)
         self._last_call       = 0.0
-        self._min_interval    = 120  # Sekunden zwischen Live-Calls
+        self._min_interval    = 300  # Sekunden zwischen Live-Calls (5 Minuten)
         self.total_calls      = 0
         self.estimated_cost_usd = 0.0
+
+        # Tages-Limit: 10 Live-Calls, restliche 10 für Lernanalyse reserviert
+        self._max_calls_per_day = 10
+        self._calls_today       = 0
+        self._calls_date: "str | None" = None
 
         self._current_model_idx = 0
         self._model_failures    = {m: 0 for m in self.MODELS}
@@ -66,6 +71,22 @@ class GeminiAnalyst:
         from google.genai import types
 
         models_to_try = [force_model] if force_model else self.MODELS
+
+        # Tages-Reset
+        today = datetime.utcnow().date().isoformat()
+        if self._calls_date != today:
+            self._calls_date  = today
+            self._calls_today = 0
+
+        # Tages-Limit prüfen
+        if self._calls_today >= self._max_calls_per_day:
+            self._log.info(
+                "Gemini Tages-Limit erreicht (%d Calls) "
+                "— Live-Analyse pausiert bis morgen", self._max_calls_per_day
+            )
+            raise Exception("DAILY_LIMIT_REACHED")
+
+        self._calls_today += 1
 
         for model in models_to_try:
             try:
@@ -160,6 +181,10 @@ class GeminiAnalyst:
                 m for m in self.MODELS
                 if time.time() - self._model_last_429.get(m, 0.0) > 3600
             ],
+            "calls_today":        self._calls_today,
+            "max_calls_per_day":  self._max_calls_per_day,
+            "calls_remaining":    max(0, self._max_calls_per_day - self._calls_today),
+            "min_interval_sec":   self._min_interval,
         }
 
     def get_memory(self) -> list:

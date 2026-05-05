@@ -482,14 +482,37 @@ async def _stream_free() -> None:
                 except Exception:
                     logger.exception("Learning Analysis Fehler")
 
-            if scan["any_signal"] and _APP.claude is not None:
-                result = await _APP.claude.analyze({
-                    "recommendation": _APP.last_rec,
-                    "free_snapshot":  ctx,
-                })
-                if not result.get("skipped"):
-                    _APP.last_claude = result
-                    _log_verdict(result)
+            # Gemini nur bei echten, hochwertigen Signalen aufrufen
+            if _APP.claude is not None and scan["any_signal"]:
+                confidence        = best.get("confidence", 0.0)
+                active_sig_types  = [s.get("type") for s in best.get("signals", [])]
+                bias_probability  = (ctx.get("bias") or {}).get("probability", 0)
+                time_of_day_now   = best.get("time_of_day", "") or ""
+                open_trades_count = len(_APP.simulator.get_open_trades())
+
+                should_call_gemini = (
+                    confidence >= 0.75
+                    and len(set(active_sig_types)) >= 2
+                    and bias_probability >= 70
+                    and time_of_day_now not in ("PREMARKET", "LUNCH")
+                    and open_trades_count == 0
+                )
+
+                if should_call_gemini:
+                    result = await _APP.claude.analyze({
+                        "recommendation": _APP.last_rec,
+                        "free_snapshot":  ctx,
+                    })
+                    if not result.get("skipped"):
+                        _APP.last_claude = result
+                        _log_verdict(result)
+                else:
+                    logger.debug(
+                        "Gemini übersprungen: conf=%.0f%% bias=%.0f%% "
+                        "signals=%d time=%s open=%d",
+                        confidence * 100, bias_probability,
+                        len(set(active_sig_types)), time_of_day_now, open_trades_count,
+                    )
         except Exception:
             logger.exception("Free-data signal/AI pipeline error — continuing.")
         finally:

@@ -236,9 +236,20 @@ def _sidebar(state: Optional[dict]) -> None:
                             "gemini-2.5-flash Quota heute erreicht → "
                             "gemini-2.0-flash-lite aktiv"
                         )
+                    # Tages-Limit Anzeige
+                    calls_today  = cs.get("calls_today", 0)
+                    max_calls    = cs.get("max_calls_per_day", 10)
+                    remaining    = cs.get("calls_remaining", max_calls)
+                    if remaining > 5:
+                        st.success(f"🧠 Gemini: {remaining}/{max_calls} Calls verfügbar")
+                    elif remaining > 0:
+                        st.warning(f"⚠️ Gemini: Noch {remaining} Calls heute")
+                    else:
+                        st.error("🔴 Gemini: Tageslimit erreicht")
+
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.metric("Calls", cs.get("total_calls", 0))
+                        st.metric("Heute", calls_today)
                     with c2:
                         available = len(cs.get("models_available", []))
                         st.metric("Modelle", f"{available}/{len(cs.get('model_failures', {}))}")
