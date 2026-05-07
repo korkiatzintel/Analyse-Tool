@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ── Page configuration ─────────────────────────────────────────────────────────
 st.set_page_config(
@@ -816,86 +816,71 @@ def main() -> None:
 
     with tab1:
         # ── Chart Timeframe-Auswahl ─────────────────────────────────────────
-        tf = st.radio("Chart Timeframe", ["1m", "5m", "15m"],
-                      horizontal=True, index=1)
-        lookback = st.select_slider(
-            "Zeitraum",
-            options=["2h", "4h", "8h", "12h", "24h", "48h"],
-            value="8h",
-        )
-        lookback_map = {
-            "1m":  {"2h": 120, "4h": 240, "8h": 480, "12h": 720, "24h": 1440, "48h": 2880},
-            "5m":  {"2h": 24,  "4h": 48,  "8h": 96,  "12h": 144, "24h": 288,  "48h": 576},
-            "15m": {"2h": 8,   "4h": 16,  "8h": 32,  "12h": 48,  "24h": 96,   "48h": 192},
-        }
-        n_bars = lookback_map.get(tf, {}).get(lookback, 96)
-        bars = state.get("bars", {}).get(tf, [])[-n_bars:]
-        if bars:
-            df = pd.DataFrame(bars)
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=df["timestamp"], open=df["open"], high=df["high"],
-                low=df["low"], close=df["close"], name="NQ",
-                increasing_line_color="#00ff88", decreasing_line_color="#ff4444",
-            ))
-            if len(df) >= 21:
-                df["ema9"]  = df["close"].ewm(span=9).mean()
-                df["ema21"] = df["close"].ewm(span=21).mean()
-                fig.add_trace(go.Scatter(
-                    x=df["timestamp"], y=df["ema9"],
-                    name="EMA9", line=dict(color="#00aaff", width=1),
-                ))
-                fig.add_trace(go.Scatter(
-                    x=df["timestamp"], y=df["ema21"],
-                    name="EMA21", line=dict(color="#ff6600", width=1),
-                ))
-            sigs_state  = state.get("signals", {})
-            trade_setup = sigs_state.get("trade_setup")
-            if trade_setup and sigs_state.get("direction") != "NEUTRAL":
-                direction = sigs_state.get("direction")
-                color = "#00ff88" if direction == "LONG" else "#ff4444"
-                fig.add_hline(
-                    y=trade_setup["entry_price"], line_color=color,
-                    line_width=2,
-                    annotation_text=f"Entry {trade_setup['entry_price']:.2f}",
-                )
-                fig.add_hline(
-                    y=trade_setup["stop_loss_price"], line_color="#ff0000",
-                    line_dash="dash",
-                    annotation_text=f"SL {trade_setup['stop_loss_price']:.2f}",
-                )
-                fig.add_hline(
-                    y=trade_setup["take_profit_1_price"], line_color="#00ff88",
-                    line_dash="dash",
-                    annotation_text=f"TP1 {trade_setup['take_profit_1_price']:.2f}",
-                )
-                fig.add_hline(
-                    y=trade_setup["take_profit_2_price"], line_color="#00ff88",
-                    line_dash="dot",
-                    annotation_text=f"TP2 {trade_setup['take_profit_2_price']:.2f}",
-                )
-            market_chart = state.get("market", {})
-            if market_chart.get("session_high"):
-                fig.add_hline(
-                    y=market_chart["session_high"], line_color="#888888",
-                    line_dash="dot", annotation_text="Session High",
-                )
-                fig.add_hline(
-                    y=market_chart["session_low"], line_color="#888888",
-                    line_dash="dot", annotation_text="Session Low",
-                )
-            first_ts = pd.to_datetime(bars[0]["timestamp"])
-            last_ts  = pd.to_datetime(bars[-1]["timestamp"])
-            fig.update_layout(
-                template="plotly_dark", height=400,
-                margin=dict(l=0, r=0, t=30, b=0),
-                xaxis_rangeslider_visible=False,
-            )
-            fig.update_xaxes(range=[first_ts, last_ts])
-            st.plotly_chart(fig, use_container_width=True)
+        from ui.chart_component import build_chart_html
+
+        tf = st.radio("Chart Timeframe", ["1m", "5m", "15m", "1h"],
+                      horizontal=True, index=1, key="chart_tf")
+
+        bars        = state.get("bars", {}).get(tf, [])
+        sigs_state  = state.get("signals", {})
+        limit_orders = state.get("limit_orders", [])
+
+        chart_html = build_chart_html(bars, sigs_state, limit_orders, height=480)
+        components.html(chart_html, height=500, scrolling=False)
+
+        # ── Trade Setup Karte ───────────────────────────────────────────────
+        st.subheader("📋 Trade Setup")
+
+        trade_setup = sigs_state.get("trade_setup")
+        direction   = sigs_state.get("direction", "NEUTRAL")
+        confidence  = sigs_state.get("confidence", 0.0)
+        contracts   = st.session_state.get("mnq_contracts", 5)
+        mnq_tick    = 0.50
+
+        if not trade_setup or direction == "NEUTRAL" or confidence < 0.65:
+            st.info("⏳ Warte auf Signal mit >65% Konfidenz…")
         else:
-            st.info(f"Warte auf {tf} Bars...")
+            if direction == "LONG":
+                st.success(f"## ▲ BUY — LONG Setup ({confidence:.0%})")
+            else:
+                st.error(f"## ▼ SELL — SHORT Setup ({confidence:.0%})")
+
+            entry  = trade_setup.get("entry_price", 0) or 0
+            sl     = trade_setup.get("stop_loss_price", 0) or 0
+            tp1    = trade_setup.get("take_profit_1_price", 0) or 0
+            tp2    = trade_setup.get("take_profit_2_price", 0) or 0
+            sl_t   = trade_setup.get("stop_loss_ticks", 0) or (
+                int(abs(sl - entry) / 0.25) if sl and entry else 0)
+            tp1_t  = trade_setup.get("take_profit_1_ticks", 0) or (
+                int(abs(tp1 - entry) / 0.25) if tp1 and entry else 0)
+            tp2_t  = trade_setup.get("take_profit_2_ticks", 0) or (
+                int(abs(tp2 - entry) / 0.25) if tp2 and entry else 0)
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("### 🎯 Entry")
+                st.markdown(f"## **{entry:.2f}**")
+                st.caption("Limit Order setzen")
+            with c2:
+                st.markdown("### 🛑 Stop Loss")
+                st.markdown(f"## **{sl:.2f}**")
+                st.markdown(f"**{sl_t} Ticks** Risiko")
+                st.caption(f"${sl_t * mnq_tick * contracts:.0f} ({contracts} MNQ)")
+            with c3:
+                st.markdown("### 🎯 Take Profit")
+                st.markdown(f"**TP1: {tp1:.2f}**")
+                st.caption(f"+{tp1_t} Ticks / +${tp1_t * mnq_tick * contracts:.0f}")
+                st.markdown(f"**TP2: {tp2:.2f}**")
+                st.caption(f"+{tp2_t} Ticks / +${tp2_t * mnq_tick * contracts:.0f}")
+
+            rr = tp1_t / sl_t if sl_t > 0 else 0
+            st.markdown(f"**Risk/Reward: 1:{rr:.1f}**")
+            st.info(
+                f"📌 **Ausführung:**  "
+                f"1. Limit bei **{entry:.2f}** · "
+                f"2. Stop bei **{sl:.2f}** ({sl_t} Ticks) · "
+                f"3. TP1 **{tp1:.2f}** / TP2 **{tp2:.2f}**"
+            )
 
         # ── Markt-Bias Panel ───────────────────────────────────────────────
         bias = state.get("bias", {})
