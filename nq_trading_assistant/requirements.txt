@@ -21,7 +21,6 @@ fredapi>=0.5.0           # optional FRED macro data (requires free API key)
 # UI
 streamlit>=1.35.0
 plotly>=5.20.0
-lightweight-charts>=0.7   # HTML-embed via CDN; Python pkg optional
 
 # AI
 anthropic>=0.25.0
