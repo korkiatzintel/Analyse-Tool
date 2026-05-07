@@ -65,9 +65,9 @@ logger = logging.getLogger("main")
 try:
     from core.rithmic_client import RithmicConnectionManager
     _RITHMIC_AVAILABLE = True
-except ImportError as _e:
-    logger.warning("async_rithmic not installed (%s) — L2 mode unavailable.", _e)
+except (TypeError, ImportError, Exception):
     _RITHMIC_AVAILABLE = False
+    RithmicConnectionManager = None
 
 from core.order_book import OrderBook
 from core.data_buffer import DataBuffer
@@ -740,7 +740,10 @@ def main() -> None:
         mode = "demo"
     elif args.live:
         if not _RITHMIC_AVAILABLE:
-            logger.warning("--live requested but async_rithmic not installed — using free mode.")
+            logger.error(
+                "Rithmic nicht verfügbar (Python 3.14 inkompatibel). "
+                "Starte im FREE Modus."
+            )
             mode = "free"
         else:
             mode = "live"
