@@ -8,9 +8,12 @@ Usage:
 """
 
 import json
+import logging
 from datetime import datetime
 
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 
 def build_chart_html(
@@ -40,8 +43,15 @@ def build_chart_html(
         return "<div style='color:#888;padding:24px'>Keine Timestamp-Daten</div>"
 
     # Parse + sort timestamps
-    df["ts"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
-    df = df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+    df["ts"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["ts"])
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    # Remove duplicate timestamps — Lightweight Charts requires strictly ascending time
+    df = df.drop_duplicates(subset=["ts"])
+
+    # Unix seconds as integer (avoid float rounding issues)
+    df["unix"] = df["ts"].astype("int64") // 10**9
 
     for col in ("open", "high", "low", "close"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -71,19 +81,29 @@ def build_chart_html(
     vwap_data:   list = []
 
     for _, row in df.iterrows():
-        ts_unix = int(row["ts"].timestamp())
+        ts_unix = int(row["unix"])
+        if ts_unix <= 0:
+            continue  # Überspringe ungültige Timestamps
+
+        close = round(float(row["close"]), 2)
         candle_data.append({
             "time":  ts_unix,
-            "open":  round(float(row["open"]),  2),
-            "high":  round(float(row["high"]),  2),
-            "low":   round(float(row["low"]),   2),
-            "close": round(float(row["close"]), 2),
+            "open":  round(float(row.get("open",  close)), 2),
+            "high":  round(float(row.get("high",  close)), 2),
+            "low":   round(float(row.get("low",   close)), 2),
+            "close": close,
         })
         ema9_data.append({"time": ts_unix, "value": round(float(row["ema9"]),  2)})
         ema21_data.append({"time": ts_unix, "value": round(float(row["ema21"]), 2)})
         if "vwap_calc" in df.columns and not pd.isna(row.get("vwap_calc")):
             vwap_data.append({"time": ts_unix,
                                "value": round(float(row["vwap_calc"]), 2)})
+
+    if candle_data:
+        log.info(
+            "Chart: %d Bars, erste 3 Timestamps: %s",
+            len(candle_data), [c["time"] for c in candle_data[:3]],
+        )
 
     # Price lines for Entry / SL / TP
     price_lines: list = []
@@ -200,7 +220,22 @@ const chart=LightweightCharts.createChart(document.getElementById('chart'),{{
   grid:{{vertLines:{{color:'#252540'}},horzLines:{{color:'#252540'}}}},
   crosshair:{{mode:LightweightCharts.CrosshairMode.Normal}},
   rightPriceScale:{{borderColor:'#3a3a5e',scaleMargins:{{top:0.08,bottom:0.08}}}},
-  timeScale:{{borderColor:'#3a3a5e',timeVisible:true,secondsVisible:false}},
+  localization:{{
+    timeFormatter: time => {{
+      const d = new Date(time * 1000);
+      return d.toLocaleTimeString('de-DE', {{hour:'2-digit',minute:'2-digit'}});
+    }},
+  }},
+  timeScale:{{
+    borderColor:'#3a3a5e',
+    timeVisible:true,
+    secondsVisible:false,
+    tickMarkFormatter: (time) => {{
+      const d = new Date(time * 1000);
+      return d.getHours().toString().padStart(2,'0') + ':' +
+             d.getMinutes().toString().padStart(2,'0');
+    }},
+  }},
 }});
 
 const candleSeries=chart.addCandlestickSeries({{
